@@ -1,0 +1,598 @@
+"""Interactive terminal menu with a plain numbered fallback."""
+
+from __future__ import annotations
+
+import logging
+import re
+import sys
+from dataclasses import replace
+from pathlib import Path
+from typing import Any
+
+from rich.console import Console
+from rich.markup import escape
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
+
+from . import report
+from .config import Config, ConfigError
+from .fetcher import RunSummary, run_session
+from .paths import PathFileError, PathLoadResult, load_paths
+from .safety import SafetyError, check_url_allowed, estimate_requests
+from .storage import StorageError, find_latest_run, zip_directory
+from .utils import UrlError, build_url, host_of, ip_is_blocked, normalize_url
+
+MB = 1024 * 1024
+logger = logging.getLogger("scrapit")
+
+_questionary_module: Any = None
+_questionary_checked = False
+
+
+def _questionary() -> Any:
+    global _questionary_module, _questionary_checked
+    if not _questionary_checked:
+        _questionary_checked = True
+        try:
+            if sys.stdin.isatty() and sys.stdout.isatty():
+                import questionary
+
+                _questionary_module = questionary
+        except Exception:  # noqa: BLE001 - broken terminals/imports fall back to numbered menu
+            _questionary_module = None
+    return _questionary_module
+
+
+def select(console: Console, message: str, choices: list[tuple[str, str]], default: str | None = None) -> str | None:
+    questionary = _questionary()
+    if questionary is not None:
+        try:
+            answer = questionary.select(
+                message,
+                choices=[questionary.Choice(title=label, value=value) for label, value in choices],
+                default=default or choices[0][1],
+            ).ask()
+            return answer
+        except (KeyboardInterrupt, EOFError):
+            return None
+        except Exception:
+            logger.debug("questionary select failed; using fallback", exc_info=True)
+
+    console.print(f"[bold]{message}[/bold]")
+    for index, (label, _) in enumerate(choices, 1):
+        numbered = bool(re.match(r"^\d+\.\s", label))
+        prefix = "" if numbered else f"[cyan]{index}[/cyan]. "
+        console.print(f"  {prefix}{escape(label)}")
+    default_index = 1
+    if default is not None:
+        for index, (_, value) in enumerate(choices, 1):
+            if value == default:
+                default_index = index
+                break
+    while True:
+        try:
+            raw = console.input(f"Select [1-{len(choices)}] (default {default_index}): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return None
+        if not raw:
+            return choices[default_index - 1][1]
+        if raw.isdigit() and 1 <= int(raw) <= len(choices):
+            return choices[int(raw) - 1][1]
+        console.print("[red]Invalid selection, try again.[/red]")
+
+
+def text(console: Console, message: str, default: str = "") -> str | None:
+    questionary = _questionary()
+    if questionary is not None:
+        try:
+            return questionary.text(message, default=default).ask()
+        except (KeyboardInterrupt, EOFError):
+            return None
+        except Exception:
+            logger.debug("questionary text failed; using fallback", exc_info=True)
+
+    try:
+        raw = console.input(f"{escape(message)} [{escape(default)}]: ")
+    except (EOFError, KeyboardInterrupt):
+        return None
+    return raw.strip() or default
+
+
+def confirm(console: Console, message: str, default: bool = True) -> bool | None:
+    questionary = _questionary()
+    if questionary is not None:
+        try:
+            return questionary.confirm(message, default=default).ask()
+        except (KeyboardInterrupt, EOFError):
+            return None
+        except Exception:
+            logger.debug("questionary confirm failed; using fallback", exc_info=True)
+
+    suffix = "Y/n" if default else "y/N"
+    try:
+        raw = console.input(f"{escape(message)} [{suffix}]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return None
+    if not raw:
+        return default
+    return raw in ("y", "yes")
+
+
+class MenuApp:
+    def __init__(
+        self,
+        console: Console | None = None,
+        config: Config | None = None,
+        target: str | None = None,
+        paths_file: str | None = None,
+        paths: list[str] | None = None,
+        assume_yes: bool = False,
+    ) -> None:
+        self.console = console or Console()
+        self.config = config or Config()
+        self.target: str | None = None
+        self.target_ip: str | None = None
+        self.paths_file: str | None = paths_file
+        self.paths: list[str] = paths or []
+        self.paths_info: PathLoadResult | None = None
+        self.last_run: RunSummary | None = None
+        self.assume_yes = assume_yes
+        if target:
+            self._assign_target(target)
+
+    # -- header / loop ------------------------------------------------------------
+
+    def _assign_target(self, raw: str) -> bool:
+        try:
+            normalized = normalize_url(raw)
+        except UrlError as exc:
+            self.console.print(f"[red]{exc}[/red]")
+            return False
+        try:
+            ips = check_url_allowed(normalized, allow_private=True)
+            self.target_ip = ips[0]
+        except SafetyError as exc:
+            self.target_ip = None
+            self.console.print(f"[yellow]Warning:[/yellow] {escape(str(exc))}")
+        self.target = normalized
+        if (
+            self.target_ip
+            and not self.config.allow_private
+            and ip_is_blocked(self.target_ip)
+        ):
+            self.console.print(
+                Panel(
+                    f"[yellow]'{host_of(normalized)}' resolves to a private address "
+                    f"({self.target_ip}).[/yellow]\n"
+                    "Runs will be blocked unless you enable 'Allow localhost/private targets' "
+                    "in Settings. Only do that for a server you control.",
+                    title="Private address",
+                    border_style="yellow",
+                )
+            )
+        return True
+
+    def run(self) -> None:
+        while True:
+            self._render_header()
+            choice = select(
+                self.console,
+                "What would you like to do?",
+                [
+                    ("1. Set target URL", "target"),
+                    ("2. Load paths file (.txt)", "paths"),
+                    ("3. Settings", "settings"),
+                    ("4. Preview URLs that will be requested", "preview"),
+                    ("5. Start fetching", "start"),
+                    ("6. View last results", "results"),
+                    ("7. Export report / ZIP the downloads", "export"),
+                    ("8. Help / About", "help"),
+                    ("9. Exit", "exit"),
+                ],
+                default="target",
+            )
+            if choice is None:
+                self.console.print("\n[dim]Goodbye.[/dim]")
+                return
+            try:
+                if choice == "exit":
+                    answer = confirm(self.console, "Exit scrapit?", True)
+                    if answer is None:
+                        return
+                    if answer:
+                        self.console.print("[green]Goodbye.[/green]")
+                        return
+                elif choice == "target":
+                    self._set_target()
+                elif choice == "paths":
+                    self._load_paths()
+                elif choice == "settings":
+                    self._settings()
+                elif choice == "preview":
+                    self._preview()
+                elif choice == "start":
+                    self._start()
+                elif choice == "results":
+                    self._view_results()
+                elif choice == "export":
+                    self._export()
+                elif choice == "help":
+                    self._help()
+            except KeyboardInterrupt:
+                self.console.print("\n[yellow]Interrupted - back to the menu.[/yellow]")
+            except Exception as exc:
+                logger.exception("Menu action failed")
+                self.console.print(f"[red]Unexpected error:[/red] {escape(str(exc))}")
+                self.console.print("[dim]Details were written to the log file if one exists.[/dim]")
+
+    def _render_header(self) -> None:
+        if self.target:
+            target_text = escape(self.target)
+            if self.target_ip:
+                target_text += f" [dim]({self.target_ip})[/dim]"
+        else:
+            target_text = "[dim]not set[/dim]"
+
+        if self.paths:
+            source = Path(self.paths_file).name if self.paths_file else "memory"
+            paths_text = f"{escape(source)} ({len(self.paths)} loaded)"
+        else:
+            paths_text = "[dim]not set[/dim]"
+
+        body = (
+            f"[bold]Target :[/bold] {target_text}\n"
+            f"[bold]Paths  :[/bold] {paths_text}\n"
+            f"[bold]Output :[/bold] {escape(str(self.config.output_dir))}"
+        )
+        self.console.print(
+            Panel(Text.from_markup(body), title="SCRAPIT", subtitle="polite path fetcher", border_style="cyan")
+        )
+
+    # -- actions ------------------------------------------------------------------
+
+    def _set_target(self) -> None:
+        raw = text(self.console, "Target base URL", default=self.target or "")
+        if raw is None:
+            return
+        raw = raw.strip()
+        if not raw:
+            self.console.print("[yellow]No change.[/yellow]")
+            return
+        if self._assign_target(raw):
+            self.console.print(f"[green]Target set:[/green] {escape(self.target or '')}")
+
+    def _load_paths(self) -> None:
+        default = self.paths_file or "paths.txt"
+        raw = text(self.console, "Paths file", default=default)
+        if raw is None:
+            return
+        raw = raw.strip()
+        if not raw:
+            self.console.print("[yellow]No change.[/yellow]")
+            return
+        try:
+            result = load_paths(raw, self.target)
+        except PathFileError as exc:
+            self.console.print(Panel(f"[red]{escape(str(exc))}[/red]", title="Paths error", border_style="red"))
+            return
+
+        self.paths = result.paths
+        self.paths_file = str(Path(raw).expanduser())
+        self.paths_info = result
+        self.console.print(f"[green]{escape(result.summary)}[/green]")
+        for warning in result.warnings[:8]:
+            self.console.print(f"[yellow]Warning:[/yellow] {escape(warning)}")
+        if len(result.warnings) > 8:
+            self.console.print(f"[dim]... and {len(result.warnings) - 8} more warning(s).[/dim]")
+
+        table = Table(title="First paths", header_style="bold")
+        table.add_column("#", justify="right", style="dim")
+        table.add_column("Path", style="cyan")
+        for index, path in enumerate(result.paths[:10], 1):
+            table.add_row(str(index), path)
+        self.console.print(table)
+        if len(result.paths) > 10:
+            self.console.print(f"[dim]... and {len(result.paths) - 10} more path(s).[/dim]")
+
+    def _settings(self) -> None:
+        while True:
+            cfg = self.config
+            choice = select(
+                self.console,
+                "Settings",
+                [
+                    (f"1. Delay between requests: {cfg.delay:g} s", "delay"),
+                    (f"2. Timeout: {cfg.timeout:g} s", "timeout"),
+                    (f"3. Max retries: {cfg.max_retries}", "retries"),
+                    (f"4. Follow redirects: {'on' if cfg.follow_redirects else 'off'}", "redirects"),
+                    (f"5. Max download size: {cfg.max_download_mb:g} MB", "size"),
+                    (f"6. Respect robots.txt: {'on' if cfg.respect_robots else 'off'}", "robots"),
+                    (f"7. User-Agent: {cfg.user_agent}", "ua"),
+                    (f"8. Extra headers: {len(cfg.extra_headers)} set", "headers"),
+                    (f"9. Verify TLS certificates: {'on' if cfg.verify_tls else 'off'}", "tls"),
+                    (f"10. Output folder: {cfg.output_dir}", "output"),
+                    (f"11. Save response headers: {'on' if cfg.save_headers else 'off'}", "save_headers"),
+                    (f"12. Download linked assets: {'on' if cfg.download_assets else 'off'}", "assets"),
+                    (f"13. Allow localhost/private targets: {'on' if cfg.allow_private else 'off'}", "private"),
+                    (f"14. Max paths per run: {cfg.max_paths}", "max_paths"),
+                    ("15. Back", "back"),
+                ],
+                default="back",
+            )
+            if choice is None or choice == "back":
+                return
+            try:
+                self._edit_setting(choice)
+            except KeyboardInterrupt:
+                self.console.print("\n[yellow]Cancelled.[/yellow]")
+
+    def _edit_setting(self, choice: str) -> None:
+        cfg = replace(self.config)
+
+        if choice == "delay":
+            raw = text(self.console, "Delay in seconds (min 0.2)", default=f"{cfg.delay:g}")
+            if raw is None:
+                return
+            try:
+                cfg.delay = float(raw)
+            except ValueError:
+                self.console.print("[red]Enter a number.[/red]")
+                return
+        elif choice == "timeout":
+            raw = text(self.console, "Timeout in seconds", default=f"{cfg.timeout:g}")
+            if raw is None:
+                return
+            try:
+                cfg.timeout = float(raw)
+            except ValueError:
+                self.console.print("[red]Enter a number.[/red]")
+                return
+        elif choice == "retries":
+            raw = text(self.console, "Max retries (0-5)", default=str(cfg.max_retries))
+            if raw is None:
+                return
+            try:
+                cfg.max_retries = int(raw)
+            except ValueError:
+                self.console.print("[red]Enter a whole number.[/red]")
+                return
+        elif choice == "redirects":
+            answer = confirm(self.console, "Follow redirects?", cfg.follow_redirects)
+            if answer is None:
+                return
+            cfg.follow_redirects = answer
+        elif choice == "size":
+            raw = text(self.console, "Max download size in MB", default=f"{cfg.max_download_mb:g}")
+            if raw is None:
+                return
+            try:
+                cfg.max_download_bytes = int(float(raw) * MB)
+            except ValueError:
+                self.console.print("[red]Enter a number.[/red]")
+                return
+        elif choice == "robots":
+            answer = confirm(self.console, "Respect robots.txt?", cfg.respect_robots)
+            if answer is None:
+                return
+            cfg.respect_robots = answer
+        elif choice == "ua":
+            raw = text(self.console, "User-Agent", default=cfg.user_agent)
+            if raw is None:
+                return
+            cfg.user_agent = raw
+        elif choice == "headers":
+            current = "; ".join(f"{key}: {value}" for key, value in cfg.extra_headers.items())
+            raw = text(self.console, "Extra headers ('Name: Value; Name2: Value2', empty clears)", default=current)
+            if raw is None:
+                return
+            headers: dict[str, str] = {}
+            for part in [item.strip() for item in raw.split(";") if item.strip()]:
+                if ":" not in part:
+                    self.console.print(f"[red]Invalid header '{escape(part)}' - use Name: Value.[/red]")
+                    return
+                key, value = part.split(":", 1)
+                headers[key.strip()] = value.strip()
+            cfg.extra_headers = headers
+        elif choice == "tls":
+            answer = confirm(self.console, "Verify TLS certificates? (off is unsafe)", cfg.verify_tls)
+            if answer is None:
+                return
+            cfg.verify_tls = answer
+            if not answer:
+                self.console.print(
+                    Panel(
+                        "[yellow]TLS verification is now OFF. Only use this against a test server "
+                        "with a self-signed certificate you control.[/yellow]",
+                        title="Warning",
+                        border_style="yellow",
+                    )
+                )
+        elif choice == "output":
+            raw = text(self.console, "Output folder", default=str(cfg.output_dir))
+            if raw is None:
+                return
+            cfg.output_dir = Path(raw).expanduser()
+        elif choice == "save_headers":
+            answer = confirm(self.console, "Save response headers alongside each file?", cfg.save_headers)
+            if answer is None:
+                return
+            cfg.save_headers = answer
+        elif choice == "assets":
+            answer = confirm(self.console, "Download linked JS/CSS/images found in HTML?", cfg.download_assets)
+            if answer is None:
+                return
+            cfg.download_assets = answer
+        elif choice == "private":
+            answer = confirm(
+                self.console,
+                "Allow localhost/private IP targets? Only for servers you own.",
+                cfg.allow_private,
+            )
+            if answer is None:
+                return
+            cfg.allow_private = answer
+            if answer:
+                self.console.print(
+                    Panel(
+                        "[yellow]Private targets are allowed. Keep this off unless you are testing "
+                        "your own local server.[/yellow]",
+                        title="Warning",
+                        border_style="yellow",
+                    )
+                )
+        elif choice == "max_paths":
+            raw = text(self.console, "Max paths per run (1-5000)", default=str(cfg.max_paths))
+            if raw is None:
+                return
+            try:
+                cfg.max_paths = int(raw)
+            except ValueError:
+                self.console.print("[red]Enter a whole number.[/red]")
+                return
+            cfg.warn_paths = min(cfg.warn_paths, cfg.max_paths)
+        else:
+            return
+
+        try:
+            cfg.validate()
+        except ConfigError as exc:
+            self.console.print(Panel(f"[red]{escape(str(exc))}[/red]", title="Invalid value", border_style="red"))
+            return
+        self.config = cfg
+        self.console.print("[green]Setting saved.[/green]")
+
+    def _preview(self) -> None:
+        if not self._require_ready():
+            return
+        assert self.target is not None
+        urls = [build_url(self.target, path) for path in self.paths]
+        table = Table(title=f"Preview ({len(urls)} URL(s))", header_style="bold")
+        table.add_column("#", justify="right", style="dim")
+        table.add_column("URL", style="cyan")
+        for index, url in enumerate(urls[:100], 1):
+            table.add_row(str(index), url)
+        self.console.print(table)
+        if len(urls) > 100:
+            self.console.print(f"[dim]... and {len(urls) - 100} more URL(s).[/dim]")
+        planned = estimate_requests(len(urls), self.config.respect_robots)
+        self.console.print(
+            f"[dim]About {planned} request(s) will be sent sequentially. "
+            f"robots.txt is fetched and checked at run time.[/dim]"
+        )
+        if len(urls) > self.config.max_paths:
+            self.console.print(
+                f"[yellow]Warning:[/yellow] {len(urls)} paths exceed the cap of {self.config.max_paths}; "
+                "the run will be refused."
+            )
+
+    def _start(self) -> None:
+        if not self._require_ready():
+            return
+        try:
+            self.config.validate()
+        except ConfigError as exc:
+            self.console.print(Panel(f"[red]{escape(str(exc))}[/red]", title="Invalid settings", border_style="red"))
+            return
+        assert self.target is not None
+        summary = run_session(
+            self.config,
+            self.target,
+            self.paths,
+            self.console,
+            assume_yes=self.assume_yes,
+        )
+        if summary is not None:
+            self.last_run = summary
+
+    def _view_results(self) -> None:
+        run_dir = self.last_run.run_dir if self.last_run else find_latest_run(self.config.output_dir)
+        if run_dir is None:
+            self.console.print("[dim]No saved results yet. Run a fetch first.[/dim]")
+            return
+        try:
+            payload = report.load_results(run_dir)
+        except report.ReportError as exc:
+            self.console.print(Panel(f"[red]{escape(str(exc))}[/red]", title="Results error", border_style="red"))
+            return
+        report.render_report_meta(self.console, payload)
+        results = payload.get("results", [])
+        report.render_results(self.console, results, title=f"Results ({len(results)})")
+
+    def _export(self) -> None:
+        run_dir = self.last_run.run_dir if self.last_run else find_latest_run(self.config.output_dir)
+        if run_dir is None:
+            raw = text(self.console, "Run folder to export", default="")
+            if raw is None or not raw.strip():
+                return
+            run_dir = Path(raw).expanduser()
+        if not (Path(run_dir) / "results.json").is_file():
+            self.console.print(Panel(f"[red]No results.json in '{escape(str(run_dir))}'.[/red]", title="Export", border_style="red"))
+            return
+        try:
+            payload = report.load_results(run_dir)
+            report.write_all(run_dir, payload)
+            archive = zip_directory(run_dir)
+        except (report.ReportError, StorageError) as exc:
+            self.console.print(Panel(f"[red]{escape(str(exc))}[/red]", title="Export failed", border_style="red"))
+            return
+        self.console.print(
+            Panel(
+                Text.from_markup(
+                    f"[green]Reports regenerated:[/green]\n"
+                    f"  {escape(str(Path(run_dir) / 'results.json'))}\n"
+                    f"  {escape(str(Path(run_dir) / 'results.csv'))}\n"
+                    f"  {escape(str(Path(run_dir) / 'report.md'))}\n"
+                    f"[green]ZIP:[/green] {escape(str(archive))}"
+                ),
+                title="Export complete",
+                border_style="green",
+            )
+        )
+
+    def _help(self) -> None:
+        self.console.print(
+            Panel(
+                Text.from_markup(
+                    "[bold]scrapit 1.0[/bold]\n\n"
+                    "Sends one polite GET request per path, sequentially, and saves whatever it finds. "
+                    "No authentication bypass, header spoofing, proxying or form submission is attempted.\n\n"
+                    "[bold]Paths file[/bold] - one path per line. Blank lines and lines starting with # are ignored. "
+                    "A leading slash is added when missing. Full URLs are accepted only when their host matches "
+                    "the target. Exact duplicates are removed and order is preserved.\n\n"
+                    "[bold]Example[/bold]\n"
+                    "  /admin\n"
+                    "  /js\n"
+                    "  robots.txt\n"
+                    "  # comments are ignored\n\n"
+                    "[bold]Status colors[/bold]"
+                ),
+                title="Help / About",
+                border_style="cyan",
+            )
+        )
+        table = Table(header_style="bold", show_header=False)
+        table.add_column("Color")
+        table.add_column("Meaning")
+        for color, meaning in [
+            ("green", "2xx - found and downloaded"),
+            ("yellow", "3xx redirect, 429 rate limit, soft 404, too large"),
+            ("orange3", "401 / 403 - protected, logged only"),
+            ("red", "404 / 410, server errors, network errors"),
+            ("dim", "blocked by robots.txt or skipped"),
+        ]:
+            table.add_row(Text(color, style=color), meaning)
+        self.console.print(table)
+        self.console.print(
+            "[dim]Ctrl+C stops a run and saves partial results. Use only on sites you own or are "
+            "explicitly authorized to test.[/dim]"
+        )
+
+    def _require_ready(self) -> bool:
+        if not self.target:
+            self.console.print("[yellow]Set a target URL first (option 1).[/yellow]")
+            return False
+        if not self.paths:
+            self.console.print("[yellow]Load a paths file first (option 2).[/yellow]")
+            return False
+        return True

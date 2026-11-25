@@ -1,0 +1,12 @@
+# scrapit sample paths - one path per line
+/robots.txt
+/sitemap.xml
+/js
+/css
+/images
+/login
+/about
+/contact
+/admin
+/user
+# lines starting with # are ignored
