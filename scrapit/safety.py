@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from urllib.parse import urlsplit
 from urllib.robotparser import RobotFileParser
 
-from .utils import Resolver, host_of, ip_is_blocked, resolve_host
+from .utils import Resolver, host_of, ip_is_blocked, resolve_host, strip_control_chars
 
 
 class SafetyError(Exception):
@@ -59,10 +59,31 @@ def primary_ip(url: str, resolver: Resolver | None = None) -> str:
     return addresses[0]
 
 
+def _confirmation_host(value: str) -> str:
+    """Extract the bare host from whatever the user typed (hostname, URL or host:port)."""
+    text = strip_control_chars(value or "").strip()
+    if not text:
+        return ""
+    candidate = text if "//" in text else f"//{text}"
+    try:
+        host = urlsplit(candidate).hostname or ""
+    except ValueError:
+        return ""
+    host = host.rstrip(".").lower()
+    try:
+        return host.encode("idna").decode("ascii")
+    except UnicodeError:
+        return host
+
+
 def host_confirmation_matches(typed: str, target: str) -> bool:
-    """The user must type the target hostname exactly (case-insensitive)."""
-    expected = host_of(target) if "//" in target else target.strip().lower()
-    return (typed or "").strip().lower() == expected
+    """The user must confirm the target hostname (case-insensitive).
+
+    A pasted URL, a host with a port, a trailing dot or a trailing path is accepted
+    as long as the resulting host equals the target host.
+    """
+    expected = _confirmation_host(target)
+    return bool(expected) and _confirmation_host(typed) == expected
 
 
 def scope_message(target: str, request_count: int, ip: str) -> str:

@@ -747,7 +747,11 @@ def run_session(
             console.print("\n[yellow]Cancelled.[/yellow]")
             return None
         if not host_confirmation_matches(typed, host):
-            console.print("[red]Hostname did not match - run cancelled.[/red]")
+            console.print(
+                "[red]Hostname did not match - run cancelled.[/red]\n"
+                f"[dim]Expected the hostname [bold]{escape(host)}[/bold] "
+                "(without https://, a port or a path).[/dim]"
+            )
             return None
     else:
         console.print(

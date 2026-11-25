@@ -66,6 +66,16 @@ def test_host_confirmation_matches_exactly():
     assert not host_confirmation_matches("", "https://example.com")
 
 
+def test_host_confirmation_accepts_pasted_variants():
+    assert host_confirmation_matches("https://example.com", "https://example.com")
+    assert host_confirmation_matches("https://example.com/admin?x=1", "https://example.com/admin")
+    assert host_confirmation_matches("example.com:8443", "https://example.com:8443/x")
+    assert host_confirmation_matches("example.com.", "https://example.com")
+    assert host_confirmation_matches("example.com/path", "https://example.com")
+    assert host_confirmation_matches("пример.рф", "https://xn--e1afmkfd.xn--p1ai")
+    assert not host_confirmation_matches("https://evil.com/example.com", "https://example.com")
+
+
 def test_estimate_requests_includes_robots_and_probe():
     assert estimate_requests(10, True) == 12
     assert estimate_requests(10, False) == 11
