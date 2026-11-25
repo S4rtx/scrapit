@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import logging
 import socket
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -176,24 +177,34 @@ class LiveDisplay:
             console=console,
         )
         self.task = self.progress.add_task("Starting...", total=max(total, 1))
-        self.table = Table(header_style="bold", expand=False)
-        self.table.add_column("Path", style="cyan", max_width=40, no_wrap=True)
-        self.table.add_column("Status", no_wrap=True)
-        self.table.add_column("Type", max_width=20)
-        self.table.add_column("Size", justify="right")
-        self.table.add_column("Time", justify="right")
-        self.table.add_column("Saved As", max_width=35)
+        self.table = self._make_table()
         self.rows: list[FetchResult] = []
         self._index = 0
+        self._lock = threading.RLock()
         self.live = Live(Group(self.progress, self.table), console=console, refresh_per_second=6)
+
+    @staticmethod
+    def _make_table() -> Table:
+        table = Table(header_style="bold", expand=False)
+        table.add_column("Path", style="cyan", max_width=40, no_wrap=True)
+        table.add_column("Status", no_wrap=True)
+        table.add_column("Type", max_width=20)
+        table.add_column("Size", justify="right")
+        table.add_column("Time", justify="right")
+        table.add_column("Saved As", max_width=35)
+        return table
 
     def start(self) -> None:
         if self.enabled:
             self.live.start()
 
     def stop(self) -> None:
-        if self.enabled:
+        if not self.enabled:
+            return
+        try:
             self.live.stop()
+        except Exception:  # noqa: BLE001 - the display is cosmetic; never lose results over it
+            logger.debug("Live display shutdown failed", exc_info=True)
 
     def path_started(self, index: int, total: int, path: str) -> None:
         self._index = index
@@ -207,12 +218,13 @@ class LiveDisplay:
             self.console.print(f"[dim]({index}/{total})[/dim] {escape(path)}")
 
     def add(self, result: FetchResult) -> None:
-        self.rows.append(result)
-        if len(self.rows) > 12:
-            self.rows = self.rows[-12:]
-        if result.asset_of is None:
-            self.progress.update(self.task, completed=self._index)
-        self._rebuild()
+        with self._lock:
+            self.rows.append(result)
+            if len(self.rows) > 12:
+                self.rows = self.rows[-12:]
+            if result.asset_of is None:
+                self.progress.update(self.task, completed=self._index)
+            self._rebuild()
         if not self.enabled:
             saved = (result.saved_as or "").removeprefix("files/")
             self.console.print(
@@ -224,10 +236,13 @@ class LiveDisplay:
             )
 
     def _rebuild(self) -> None:
-        self.table.rows.clear()
+        # Rich's refresh thread renders the live table concurrently. Mutating rows in place
+        # makes it see more cells than rows and crash with IndexError, so build a replacement
+        # table offscreen and swap the whole renderable under the display lock.
+        table = self._make_table()
         for item in self.rows:
             saved = (item.saved_as or "").removeprefix("files/")
-            self.table.add_row(
+            table.add_row(
                 Text(item.path[:60], style=report.label_style(item.label)),
                 Text(
                     f"{item.status if item.status is not None else '-'} {item.label}",
@@ -238,6 +253,9 @@ class LiveDisplay:
                 Text(f"{item.response_ms} ms"),
                 Text(saved[:35], style="dim"),
             )
+        self.table = table
+        if self.enabled:
+            self.live.update(Group(self.progress, table))
 
 
 class Scrapit:
@@ -587,6 +605,15 @@ class Scrapit:
             path += "?" + parsed.query
         return path
 
+    def _emit(self, callback: Callable[..., None] | None, *args: Any) -> None:
+        """Run a UI callback without letting a cosmetic failure abort the run."""
+        if callback is None:
+            return
+        try:
+            callback(*args)
+        except Exception:  # noqa: BLE001 - the callback only draws progress; results must survive
+            self.logger.debug("UI callback failed", exc_info=True)
+
     def run(
         self,
         on_result: Callable[[FetchResult], None] | None = None,
@@ -599,8 +626,7 @@ class Scrapit:
             self._probe_soft404()
             total = len(self.paths)
             for index, path in enumerate(self.paths, 1):
-                if on_path_start is not None:
-                    on_path_start(index, total, path)
+                self._emit(on_path_start, index, total, path)
                 try:
                     url = build_url(self.base, path)
                 except ValueError as exc:
@@ -614,11 +640,14 @@ class Scrapit:
                     result = self._fetch_one(path, url)
                 self.results.append(result)
                 self._log_result(result)
-                if on_result is not None:
-                    on_result(result)
+                self._emit(on_result, result)
 
                 if result.label == "FOUND" and result.body is not None:
-                    assets = self._extract_assets(result.body, result.final_url or result.url)
+                    try:
+                        assets = self._extract_assets(result.body, result.final_url or result.url)
+                    except Exception:  # noqa: BLE001 - asset discovery must never abort a run
+                        self.logger.debug("Asset discovery failed", exc_info=True)
+                        assets = []
                     result.body = None
                     for asset_url in assets:
                         asset_path = self._asset_target(asset_url)
@@ -630,8 +659,7 @@ class Scrapit:
                         )
                         self.results.append(asset_result)
                         self._log_result(asset_result)
-                        if on_result is not None:
-                            on_result(asset_result)
+                        self._emit(on_result, asset_result)
         except KeyboardInterrupt:
             self.stopped = True
             self.logger.warning("Interrupted by user; partial results retained")
@@ -672,6 +700,7 @@ def run_session(
     i_have_permission: bool = False,
     interactive: bool = True,
     create_zip: bool = False,
+    run_name: str | None = None,
     resolver: Resolver | None = None,
     client: httpx.Client | None = None,
 ) -> RunSummary | None:
@@ -770,7 +799,12 @@ def run_session(
             return None
 
     try:
-        storage = RunStorage(config.output_dir, host, save_headers=config.save_headers)
+        storage = RunStorage(
+            config.output_dir,
+            host,
+            save_headers=config.save_headers,
+            run_name=run_name,
+        )
     except StorageError as exc:
         console.print(Panel(f"[red]{escape(str(exc))}[/red]", title="Output folder error", border_style="red"))
         return None
@@ -800,8 +834,10 @@ def run_session(
     try:
         fetcher.run(on_result=display.add, on_path_start=display.path_started)
     finally:
-        display.stop()
-        fetcher.close()
+        try:
+            display.stop()
+        finally:
+            fetcher.close()
 
     counts = report.compute_counts(fetcher.results)
     payload = report.build_payload(

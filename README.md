@@ -4,6 +4,8 @@
 
 **A polite, terminal-first website path fetcher for authorized security testing.**
 
+Built and maintained by [@S4rtx](https://github.com/S4rtx).
+
 Scrapit requests a list of paths against one target, records what exists, downloads the content it
 finds, and writes JSON / CSV / Markdown reports. It runs as an interactive TUI by default and as a
 flagged CLI for repeatable runs.
@@ -13,8 +15,8 @@ flagged CLI for repeatable runs.
 **Contents:** [Features](#features) · [Install](#install) · [Quick start](#quick-start) ·
 [TUI](#interactive-tui) · [CLI](#command-line-reference) · [Paths file](#paths-file-format) ·
 [Output](#output-layout) · [Reports](#reports) · [Safety](#safety-model) ·
-[Architecture](#architecture) · [Testing](#testing) · [Demo](#local-demo-own-server) ·
-[Responsible use](#responsible-use)
+[Architecture](#architecture) · [Updates](#updates) · [Testing](#testing) ·
+[Demo](#local-demo-own-server) · [Responsible use](#responsible-use)
 
 ---
 
@@ -28,6 +30,8 @@ flagged CLI for repeatable runs.
 - **Reports** — `results.json`, `results.csv`, `report.md`, and an optional ZIP
 - **Audit trail** — every request logged to `output/<host>/scrapit.log`
 - **Two interfaces** — arrow-key TUI plus scriptable flags
+- **Self-updating** — on launch it notifies you when a newer GitHub release exists and offers to update; `--check-updates` / `--update` do the same from the CLI
+- **Named runs** — optionally name each run so its output folder is easy to find
 - **No bypass features** — no auth bypass, WAF evasion, UA spoofing, proxying or form submission
 
 ## Requirements
@@ -120,7 +124,8 @@ passed explicitly for non-interactive runs.
  6. View last results
  7. Export report / ZIP the downloads
  8. Help / About
- 9. Exit
+ 9. Check for updates
+ 10. Exit
 ```
 
 What each option does:
@@ -131,10 +136,11 @@ What each option does:
 | Load paths file | Parses/cleans paths, reports duplicates/skips, previews the first 10 |
 | Settings | Delay, timeout, retries, redirects, size cap, robots, UA, headers, TLS, output, assets, private targets, path cap |
 | Preview URLs | Table of every final URL and the planned request count |
-| Start fetching | Scope confirmation, then the sequential fetch with live progress |
+| Start fetching | Scope confirmation, an optional run name for the output folder, then the sequential fetch with live progress |
 | View last results | Rich table loaded from the latest `results.json` |
 | Export | Regenerates reports and creates a ZIP of the run folder |
-| Help | Paths-file format and status-color legend |
+| Help | Version, author, paths-file format and status-color legend |
+| Check for updates | Compares with the newest GitHub release/tag and can `git pull --ff-only` |
 | Exit | Confirmation, then clean exit |
 
 Ctrl+C during a run stops it cleanly, keeps partial results, writes the reports, and returns to the
@@ -164,9 +170,12 @@ scrapit [--target URL] [--paths FILE] [flags]
 | `--no-save-headers` | Do not write `headers/*.headers.txt` |
 | `--max-paths N` | Request cap per run (default `500`) |
 | `--zip` | ZIP the run folder at the end |
+| `--name NAME` | Name for this run, used as a prefix on the output folder |
 | `--yes` | Skip interactive confirmations (not the permission flag) |
 | `--i-have-permission` | Explicit authorization confirmation (required non-interactively) |
 | `--debug` | Show a traceback for unexpected errors |
+| `--check-updates` | Compare with the newest GitHub release/tag, then exit |
+| `--update` | Check for a newer release and update this git checkout (`git pull --ff-only`) |
 | `--version` | Print the version |
 
 Passing `--target` and `--paths` with `--yes` but without `--i-have-permission` exits with code `2`.
@@ -202,7 +211,7 @@ Parsing rules:
 output/
 └── example.com/
     ├── scrapit.log                     # append-only audit log (every request)
-    └── 2026-11-25_14-30-05/
+    └── 2026-11-25_14-30-05/            # or <name>_2026-11-25_14-30-05/ with --name
         ├── files/
         │   ├── admin/index.html
         │   ├── js/index.html
@@ -289,11 +298,28 @@ report.py  ── results.json / results.csv / report.md + rich summary
 | `scrapit/fetcher.py` | HTTP loop, retries, redirects, soft-404, assets, run orchestration |
 | `scrapit/storage.py` | Run folder layout, sanitization, safe writes, ZIP |
 | `scrapit/report.py` | JSON/CSV/Markdown generation and rich tables |
+| `scrapit/update.py` | GitHub release check and `git pull --ff-only` self-update |
 | `scrapit/utils.py` | URL normalization, IP checks, filename sanitizing, logging setup |
 
 Redirects are handled manually (httpx auto-follow is off) so each hop is DNS-checked before the
 request. The fetcher keeps a single `httpx.Client` for connection reuse and sends requests strictly
 one at a time.
+
+## Updates
+
+`scrapit` checks itself against the newest GitHub release (falling back to tags). When it opens it
+quietly checks for updates and, if a newer release exists, shows an update panel and asks whether to
+update. The same check is available explicitly:
+
+```bash
+scrapit --check-updates   # report only
+scrapit --update          # check, then git pull --ff-only
+```
+
+The same is available from the menu under **9. Check for updates**. Installations that are not a git
+checkout are never modified; the command prints the `pip install --upgrade git+...` equivalent instead.
+Update failures (local changes, diverged history, rate limits) are reported without touching the working
+tree.
 
 ## Testing
 

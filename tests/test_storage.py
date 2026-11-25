@@ -136,3 +136,23 @@ def test_unsafe_component_is_rejected_at_safe_join(tmp_path):
         from scrapit.utils import safe_join
 
         safe_join(tmp_path, "..", "x")
+
+
+def test_run_name_prefixes_run_folder(tmp_path):
+    storage = RunStorage(
+        tmp_path / "output",
+        "example.com",
+        timestamp="2026-11-25_14-30-05",
+        run_name="evening-scan",
+    )
+    assert storage.run_dir.name == "evening-scan_2026-11-25_14-30-05"
+
+
+def test_blank_run_name_falls_back_to_timestamp(tmp_path):
+    storage = RunStorage(
+        tmp_path / "output",
+        "example.com",
+        timestamp="2026-11-25_14-30-05",
+        run_name="   ",
+    )
+    assert storage.run_dir.name == "2026-11-25_14-30-05"

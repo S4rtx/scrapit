@@ -16,9 +16,48 @@ from .config import Config
 from .fetcher import run_session
 from .menu import MenuApp
 from .paths import PathFileError, load_paths
+from .update import DEFAULT_REPO, check_for_updates, perform_update, project_root
 
 MB = 1024 * 1024
 logger = logging.getLogger("scrapit")
+
+
+def run_update_command(console: Console, *, apply_update: bool) -> int:
+    info = check_for_updates(__version__)
+    if info.error:
+        console.print(f"[yellow]{escape(info.error)}[/yellow]")
+        return 1
+    if not info.available:
+        console.print(
+            f"[green]scrapit {__version__} is up to date.[/green] "
+            f"(latest: {escape(info.latest or __version__)})"
+        )
+        return 0
+    console.print(
+        f"[bold]Update available:[/bold] {__version__} -> [green]{escape(info.latest or '')}[/green]\n"
+        f"[dim]{escape(info.url)}[/dim]"
+    )
+    if not apply_update:
+        console.print("[dim]Run 'scrapit --update' to update this checkout.[/dim]")
+        return 0
+    if project_root() is None:
+        console.print(
+            "[yellow]This install is not a git checkout, so it cannot update itself.[/yellow]\n"
+            f"[dim]Update with: pip install --upgrade git+https://github.com/{DEFAULT_REPO}.git[/dim]"
+        )
+        return 1
+    result = perform_update()
+    if result.error:
+        console.print(f"[red]{escape(result.error)}[/red]")
+        if result.detail:
+            console.print(f"[dim]{escape(result.detail)}[/dim]")
+        return 1
+    console.print(
+        "[green]Updated.[/green] Restart scrapit to use the new version."
+        if result.updated
+        else "[green]Already up to date.[/green]"
+    )
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -45,6 +84,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-save-headers", action="store_true", help="Do not save response headers")
     parser.add_argument("--max-paths", type=int, help="Request cap per run (default 500)")
     parser.add_argument("--zip", action="store_true", help="Create a ZIP of the run folder")
+    parser.add_argument("--name", dest="run_name", help="Name for this run (used in the output folder name)")
     parser.add_argument(
         "--yes",
         action="store_true",
@@ -56,6 +96,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Confirm you own the target or have explicit written permission (required non-interactively)",
     )
     parser.add_argument("--debug", action="store_true", help="Show a traceback when an unexpected error occurs")
+    parser.add_argument("--check-updates", action="store_true", help="Check GitHub for a newer release and exit")
+    parser.add_argument(
+        "--update",
+        action="store_true",
+        help="Check for a newer release and update this git checkout (git pull --ff-only)",
+    )
     parser.add_argument("--version", action="version", version=f"scrapit {__version__}")
     return parser
 
@@ -97,6 +143,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     console = Console(highlight=False)
 
+    if args.check_updates or args.update:
+        return run_update_command(console, apply_update=args.update)
+
     try:
         config = config_from_args(args)
         direct = bool(args.target and args.paths_file and (args.i_have_permission or args.yes))
@@ -127,6 +176,7 @@ def main(argv: list[str] | None = None) -> int:
                 i_have_permission=True,
                 interactive=sys.stdin.isatty(),
                 create_zip=args.zip,
+                run_name=args.run_name,
             )
             return 0 if summary is not None else 2
 
@@ -147,6 +197,7 @@ def main(argv: list[str] | None = None) -> int:
             paths_file=paths_file,
             paths=paths,
             assume_yes=args.yes,
+            run_name=args.run_name,
         )
         app.run()
         return 0

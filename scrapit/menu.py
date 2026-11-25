@@ -15,12 +15,13 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from . import report
+from . import __version__, report
 from .config import Config, ConfigError
 from .fetcher import RunSummary, run_session
 from .paths import PathFileError, PathLoadResult, load_paths
 from .safety import SafetyError, check_url_allowed, estimate_requests
 from .storage import StorageError, find_latest_run, zip_directory
+from .update import DEFAULT_REPO, GITHUB_USER, UpdateInfo, check_for_updates, perform_update, project_root
 from .utils import UrlError, build_url, host_of, ip_is_blocked, normalize_url
 
 MB = 1024 * 1024
@@ -45,6 +46,8 @@ def _questionary() -> Any:
 
 
 def select(console: Console, message: str, choices: list[tuple[str, str]], default: str | None = None) -> str | None:
+    if not choices:
+        return None
     questionary = _questionary()
     if questionary is not None:
         try:
@@ -128,6 +131,7 @@ class MenuApp:
         paths_file: str | None = None,
         paths: list[str] | None = None,
         assume_yes: bool = False,
+        run_name: str | None = None,
     ) -> None:
         self.console = console or Console()
         self.config = config or Config()
@@ -138,6 +142,7 @@ class MenuApp:
         self.paths_info: PathLoadResult | None = None
         self.last_run: RunSummary | None = None
         self.assume_yes = assume_yes
+        self.run_name = run_name.strip() if run_name and run_name.strip() else None
         if target:
             self._assign_target(target)
 
@@ -174,6 +179,7 @@ class MenuApp:
         return True
 
     def run(self) -> None:
+        self._notify_updates_on_start()
         while True:
             self._render_header()
             choice = select(
@@ -188,7 +194,8 @@ class MenuApp:
                     ("6. View last results", "results"),
                     ("7. Export report / ZIP the downloads", "export"),
                     ("8. Help / About", "help"),
-                    ("9. Exit", "exit"),
+                    ("9. Check for updates", "update"),
+                    ("10. Exit", "exit"),
                 ],
                 default="target",
             )
@@ -219,6 +226,8 @@ class MenuApp:
                     self._export()
                 elif choice == "help":
                     self._help()
+                elif choice == "update":
+                    self._check_updates()
             except KeyboardInterrupt:
                 self.console.print("\n[yellow]Interrupted - back to the menu.[/yellow]")
             except Exception as exc:
@@ -495,12 +504,24 @@ class MenuApp:
             self.console.print(Panel(f"[red]{escape(str(exc))}[/red]", title="Invalid settings", border_style="red"))
             return
         assert self.target is not None
+        run_name: str | None = self.run_name
+        if run_name is None and not self.assume_yes:
+            raw = text(
+                self.console,
+                "Name for this run (optional; appears in the output folder name)",
+                default="",
+            )
+            if raw is None:
+                self.console.print("[yellow]Cancelled.[/yellow]")
+                return
+            run_name = raw.strip() or None
         summary = run_session(
             self.config,
             self.target,
             self.paths,
             self.console,
             assume_yes=self.assume_yes,
+            run_name=run_name,
         )
         if summary is not None:
             self.last_run = summary
@@ -550,11 +571,93 @@ class MenuApp:
             )
         )
 
+    def _notify_updates_on_start(self) -> None:
+        """Check GitHub once when the tool opens and offer an update if one exists."""
+        try:
+            info = check_for_updates(__version__, timeout=3.0)
+        except Exception:  # noqa: BLE001 - a network check must never block startup
+            logger.debug("Startup update check failed", exc_info=True)
+            return
+        if info.error or not info.available:
+            return
+        self._offer_update(info, prompt="Update available. Update now?")
+
+    def _offer_update(self, info: UpdateInfo, prompt: str = "Update now with git pull?") -> None:
+        self.console.print(
+            Panel(
+                Text.from_markup(
+                    f"[bold]Update available[/bold]\n"
+                    f"Installed: {escape(info.current)}\n"
+                    f"Latest:    [green]{escape(info.latest or '')}[/green]\n"
+                    f"[dim]{escape(info.url)}[/dim]\n"
+                    f"[dim]GitHub: https://github.com/{DEFAULT_REPO} (@{GITHUB_USER})[/dim]"
+                ),
+                title="Update check",
+                border_style="cyan",
+            )
+        )
+        if project_root() is None:
+            self.console.print(
+                "[yellow]This install is not a git checkout, so it cannot update itself.[/yellow]\n"
+                f"[dim]Update with: pip install --upgrade "
+                f"git+https://github.com/{DEFAULT_REPO}.git[/dim]"
+            )
+            return
+        if not sys.stdin.isatty():
+            self.console.print("[dim]Run 'scrapit --update' to apply it.[/dim]")
+            return
+        answer = confirm(self.console, prompt, False)
+        if not answer:
+            self.console.print("[dim]Update skipped. Use option 9 from the menu to update later.[/dim]")
+            return
+        result = perform_update()
+        if result.error:
+            self.console.print(
+                Panel(
+                    f"[red]{escape(result.error)}[/red]\n[dim]{escape(result.detail)}[/dim]",
+                    title="Update failed",
+                    border_style="red",
+                )
+            )
+            return
+        message = "Updated." if result.updated else "Already up to date."
+        self.console.print(
+            Panel(
+                Text.from_markup(
+                    f"[green]{message}[/green]\n[dim]{escape(result.detail)}[/dim]\n"
+                    "Restart scrapit to use the new version."
+                ),
+                title="Update complete",
+                border_style="green",
+            )
+        )
+
+    def _check_updates(self) -> None:
+        self.console.print("[dim]Checking GitHub for the latest release...[/dim]")
+        info = check_for_updates(__version__)
+        if info.error:
+            self.console.print(
+                Panel(f"[yellow]{escape(info.error)}[/yellow]", title="Update check", border_style="yellow")
+            )
+            return
+        if not info.available:
+            self.console.print(
+                Panel(
+                    f"[green]scrapit {escape(__version__)} is up to date.[/green]\n"
+                    f"[dim]Latest release: {escape(info.latest or __version__)}[/dim]",
+                    title="No updates",
+                    border_style="green",
+                )
+            )
+            return
+        self._offer_update(info)
+
     def _help(self) -> None:
         self.console.print(
             Panel(
                 Text.from_markup(
-                    "[bold]scrapit 1.0[/bold]\n\n"
+                    f"[bold]scrapit {__version__}[/bold]\n"
+                    f"[dim]by @S4rtx - https://github.com/{DEFAULT_REPO}[/dim]\n\n"
                     "Sends one polite GET request per path, sequentially, and saves whatever it finds. "
                     "No authentication bypass, header spoofing, proxying or form submission is attempted.\n\n"
                     "[bold]Paths file[/bold] - one path per line. Blank lines and lines starting with # are ignored. "

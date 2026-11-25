@@ -6,15 +6,17 @@ virtual environment activated.
 ## 0. Setup
 
 - [ ] `pip install -e ".[dev]"` completes without errors
-- [ ] `scrapit --version` prints `scrapit 1.0.0`
+- [ ] `scrapit --version` prints `scrapit 2.2.0`
 - [ ] `python -m scrapit --version` prints the same
 - [ ] `python -m pytest -q` passes
 
 ## 1. Launch and menu
 
-- [ ] `scrapit` shows the banner, target/paths/output summary and the nine menu options
+- [ ] `scrapit` shows the banner, target/paths/output summary and the ten menu options
+- [ ] On launch the tool quietly checks GitHub; when a newer release exists it shows an update panel and asks whether to update
+- [ ] An offline launch stays quiet and still opens the menu
 - [ ] Arrow keys move the selection; Enter activates an option (questionary available)
-- [ ] Piping input (for example `printf '9\ny\n' | python -m scrapit`) uses the numbered fallback
+- [ ] Piping input (for example `printf '10\ny\n' | python -m scrapit`) uses the numbered fallback
 - [ ] Ordered numbers appear only once in the fallback menu
 - [ ] Exit asks for confirmation; `y` exits cleanly, `n` returns to the menu
 
@@ -61,11 +63,14 @@ virtual environment activated.
 ## 6. Fetch and scope confirmation
 
 - [ ] With no permission flag, the scope panel shows host, IP and request count
+- [ ] Starting a run prompts for an optional run name used in the output folder name
+- [ ] Leaving the run name blank falls back to the timestamp folder
 - [ ] Typing the wrong hostname cancels with no requests
 - [ ] Typing the exact hostname starts the run
 - [ ] `--yes` alone does **not** bypass the typed confirmation
 - [ ] Non-interactive mode without `--i-have-permission` exits with code `2`
 - [ ] The live progress bar and results table update for each path
+- [ ] The run finishes without `Unexpected error: list index out of range` on a real terminal
 - [ ] 2xx is green, 3xx yellow, 401/403 orange, 404/5xx/errors red, robots-blocked dim
 - [ ] Redirects are followed and their chains are recorded
 - [ ] A private-address redirect is blocked before the request is sent
@@ -76,7 +81,7 @@ virtual environment activated.
 
 ## 7. Reports and output
 
-- [ ] The run folder appears under `output/<host>/<timestamp>/`
+- [ ] The run folder appears under `output/<host>/<timestamp>/` (or `output/<host>/<name>_<timestamp>/`)
 - [ ] `files/` contains the downloaded bodies
 - [ ] `headers/` contains one `.headers.txt` per saved file
 - [ ] `results.json`, `results.csv` and `report.md` exist
@@ -93,14 +98,23 @@ virtual environment activated.
 - [ ] The ZIP contains `files/`, `headers/` and the reports
 - [ ] Export on a missing/invalid run folder shows a friendly error
 
-## 9. Interrupt and non-TTY behavior
+## 9. Updates
+
+- [ ] Menu **Check for updates** reports "up to date" or shows installed vs latest with the release URL
+- [ ] `scrapit --check-updates` prints the same and exits `0`
+- [ ] `scrapit --update` fast-forwards a clean git checkout and says to restart
+- [ ] A dirty checkout reports the `git pull failed` message and leaves files untouched
+- [ ] A non-git install prints the `pip install --upgrade git+...` fallback instead of touching files
+- [ ] With GitHub unreachable, the check reports an error and the menu keeps working
+
+## 10. Interrupt and non-TTY behavior
 
 - [ ] Ctrl+C during a run stops it, saves partial results and writes reports (no traceback)
 - [ ] Ctrl+C at the menu exits gracefully
 - [ ] Piped output contains no ANSI escape codes and no tracebacks
 - [ ] Ctrl+D / EOF at the menu exits cleanly
 
-## 10. End-to-end against a local server
+## 11. End-to-end against a local server
 
 ```bash
 mkdir -p /tmp/scrapit-demo/admin /tmp/scrapit-demo/js
@@ -120,7 +134,7 @@ In another terminal:
 - [ ] The summary panel reports the correct counts and run folder
 - [ ] `report.md` opens and reads correctly
 
-## 11. Safety regression
+## 12. Safety regression
 
 - [ ] Without `--allow-private`, `http://127.0.0.1:8000` is refused with an explanation
 - [ ] A `10.x`, `192.168.x`, `169.254.x`, `::1` or `fc00::` target is refused

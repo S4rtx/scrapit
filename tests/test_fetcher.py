@@ -409,3 +409,111 @@ def test_run_session_writes_reports(tmp_path, monkeypatch):
     assert data["target"] == "https://example.com"
     assert (run_dir / "files" / "admin" / "index.html").read_text() == "<h1>admin</h1>"
 
+
+def test_live_display_rebuild_survives_concurrent_refresh():
+    import threading
+    import time
+
+    from scrapit.fetcher import FetchResult, LiveDisplay
+
+    console = Console(force_terminal=True, width=120, file=io.StringIO())
+    display = LiveDisplay(console, 60)
+    display.start()
+    errors: list[BaseException] = []
+
+    def pump():
+        try:
+            for index in range(60):
+                display.path_started(index + 1, 60, f"/p{index}")
+                display.add(
+                    FetchResult(
+                        path=f"/p{index}",
+                        url=f"https://example.com/p{index}",
+                        status=200,
+                        label="FOUND",
+                        content_type="text/html",
+                        size_bytes=index * 10,
+                        response_ms=index,
+                        saved_as=f"files/p{index}.html",
+                    )
+                )
+                time.sleep(0.001)
+        except BaseException as exc:  # noqa: BLE001 - surfaced by the assert below
+            errors.append(exc)
+
+    worker = threading.Thread(target=pump)
+    worker.start()
+    worker.join()
+    display.stop()
+    assert errors == []
+
+
+def test_run_session_saves_reports_when_display_teardown_fails(tmp_path, monkeypatch):
+    def handler(request):
+        if request.url.path.startswith("/pf-"):
+            return httpx.Response(404)
+        return html_response("<h1>ok</h1>")
+
+    def boom(self):
+        raise IndexError("list index out of range")
+
+    monkeypatch.setattr(fetcher_module.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(fetcher_module.Live, "stop", boom)
+    config = Config(delay=0.2, respect_robots=False, output_dir=tmp_path / "out")
+    client = httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=False)
+    console = Console(file=io.StringIO(), width=120)
+    summary = run_session(
+        config,
+        "https://example.com",
+        ["/admin"],
+        console,
+        assume_yes=True,
+        i_have_permission=True,
+        interactive=False,
+        resolver=lambda host: PUBLIC,
+        client=client,
+    )
+    assert summary is not None
+    assert (summary.run_dir / "results.json").is_file()
+
+
+def test_run_session_uses_run_name(tmp_path):
+    def handler(request):
+        if request.url.path.startswith("/pf-"):
+            return httpx.Response(404)
+        return html_response("<h1>ok</h1>")
+
+    config = Config(delay=0.2, respect_robots=False, output_dir=tmp_path / "out")
+    client = httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=False)
+    console = Console(file=io.StringIO(), width=120)
+    summary = run_session(
+        config,
+        "https://example.com",
+        ["/admin"],
+        console,
+        assume_yes=True,
+        i_have_permission=True,
+        interactive=False,
+        run_name="evening scan",
+        resolver=lambda host: PUBLIC,
+        client=client,
+    )
+    assert summary is not None
+    assert summary.run_dir.name.startswith("evening scan_")
+    assert (summary.run_dir / "results.json").is_file()
+
+
+def test_ui_callback_failure_does_not_abort_run(tmp_path):
+    def handler(request):
+        if request.url.path.startswith("/pf-"):
+            return httpx.Response(404)
+        return html_response("<h1>ok</h1>")
+
+    fetcher, _ = make_fetcher(tmp_path, handler, ["/admin", "/js"])
+
+    def boom(*args, **kwargs):
+        raise IndexError("list index out of range")
+
+    fetcher.run(on_result=boom, on_path_start=boom)
+    assert len(fetcher.results) == 2
+    assert all(result.label in ("FOUND", "NOT_FOUND") for result in fetcher.results)

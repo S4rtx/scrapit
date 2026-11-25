@@ -39,6 +39,7 @@ class RunStorage:
         host: str,
         save_headers: bool = True,
         timestamp: str | None = None,
+        run_name: str | None = None,
     ) -> None:
         self.output_root = Path(output_dir).expanduser()
         self.host = sanitize_component(host or "unknown-host")
@@ -46,6 +47,8 @@ class RunStorage:
         self.save_headers = save_headers
 
         stamp = timestamp or time.strftime("%Y-%m-%d_%H-%M-%S")
+        if run_name and run_name.strip():
+            stamp = f"{sanitize_component(run_name.strip())}_{stamp}"
         run_dir = self.host_dir / stamp
         counter = 2
         while run_dir.exists():
