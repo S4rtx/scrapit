@@ -108,6 +108,7 @@ def build_payload(
     paths_loaded: int,
     results: list[dict[str, Any]],
     redirect_chains: int = 0,
+    discovery: bool = False,
 ) -> dict[str, Any]:
     return {
         "tool": "scrapit",
@@ -122,6 +123,7 @@ def build_payload(
         "requests_sent": requests_sent,
         "stopped_early": stopped_early,
         "paths_loaded": paths_loaded,
+        "discovery": discovery,
         "redirect_chains": redirect_chains,
         "settings": settings,
         "counts": counts,
@@ -167,6 +169,9 @@ def _settings_rows(settings: dict[str, Any]) -> list[tuple[str, str]]:
         ("Save response headers", "yes" if settings.get("save_headers") else "no"),
         ("Download linked assets", "yes" if settings.get("download_assets") else "no"),
         ("Allow localhost/private targets", "yes" if settings.get("allow_private") else "no"),
+        ("Discovery mode", "yes" if settings.get("discover") else "no"),
+        ("Crawl depth", str(settings.get("max_depth"))),
+        ("Use sitemaps", "yes" if settings.get("use_sitemap") else "no"),
         ("Max paths per run", str(settings.get("max_paths"))),
         ("Output folder", str(settings.get("output_dir"))),
     ]
@@ -191,6 +196,15 @@ def results_to_markdown(payload: dict[str, Any]) -> str:
     ]
     if payload.get("stopped_early"):
         lines.extend(["> Run stopped early (Ctrl+C). Results below are partial.", ""])
+    if payload.get("discovery"):
+        lines.extend(
+            [
+                f"> Discovery mode: started from the target and followed same-host links "
+                f"(depth {payload.get('settings', {}).get('max_depth')}); "
+                f"{len(results)} path(s) visited.",
+                "",
+            ]
+        )
 
     lines.extend(["## Settings", "", "| Setting | Value |", "| --- | --- |"])
     for key, value in _settings_rows(payload.get("settings", {})):

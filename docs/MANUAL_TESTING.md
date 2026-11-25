@@ -6,17 +6,17 @@ virtual environment activated.
 ## 0. Setup
 
 - [ ] `pip install -e ".[dev]"` completes without errors
-- [ ] `scrapit --version` prints `scrapit 2.3.0`
+- [ ] `scrapit --version` prints `scrapit 2.4.0`
 - [ ] `python -m scrapit --version` prints the same
 - [ ] `python -m pytest -q` passes
 
 ## 1. Launch and menu
 
-- [ ] `scrapit` shows the banner, target/paths/output summary and the ten menu options
+- [ ] `scrapit` shows the banner, target/paths/output/mode summary, `by @S4rtx` and the eleven menu options
 - [ ] On launch the tool quietly checks GitHub; when a newer release exists it shows an update panel and asks whether to update
 - [ ] An offline launch stays quiet and still opens the menu
 - [ ] Arrow keys move the selection; Enter activates an option (questionary available)
-- [ ] Piping input (for example `printf '10\ny\n' | python -m scrapit`) uses the numbered fallback
+- [ ] Piping input (for example `printf '11\ny\n' | python -m scrapit`) uses the numbered fallback
 - [ ] Ordered numbers appear only once in the fallback menu
 - [ ] Exit asks for confirmation; `y` exits cleanly, `n` returns to the menu
 
@@ -51,7 +51,22 @@ virtual environment activated.
 - [ ] Private targets on shows a warning panel
 - [ ] Extra headers parse `Name: Value; Name2: Value2`; invalid input is rejected
 - [ ] Invalid values do not change the active config; valid values persist
+- [ ] Discovery mode, crawl depth and sitemap toggles apply and show in the header `Mode` line
 - [ ] Back returns to the main menu
+
+## 4b. Auto-scrape (discovery mode)
+
+- [ ] Option 3 asks for a target and runs without any paths file
+- [ ] It requests `/`, `robots.txt` and `/sitemap.xml`, then follows same-host links
+- [ ] Same-host links found in HTML are queued; off-host links, `mailto:`/`javascript:` and assets are ignored
+- [ ] `Sitemap:` entries in robots.txt and `/sitemap.xml` URLs seed the crawl
+- [ ] Crawl depth is honoured (`0` visits only the start page)
+- [ ] The path cap stops the crawl
+- [ ] Links disallowed by robots.txt are never queued
+- [ ] Each path is visited at most once
+- [ ] `--discover --depth N --no-sitemap` behaves the same on the CLI
+- [ ] `report.md` and `results.json` record `discovery: true` and the crawl depth
+- [ ] The progress bar stays indeterminate (no fake total) during a crawl
 
 ## 5. Preview
 

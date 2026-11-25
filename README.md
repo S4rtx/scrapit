@@ -23,6 +23,8 @@ flagged CLI for repeatable runs.
 ## Features
 
 - **Sequential and polite** — one GET at a time, configurable delay, no concurrency
+- **Two ways to scan** — a paths file, or **auto-scrape** mode that crawls a site from its home page
+  and sitemaps by following same-host links (no paths file needed)
 - **Scope-aware** — typed-hostname confirmation, private-IP refusal, per-redirect IP re-checks
 - **robots.txt aware** — fetched once, disallowed paths marked `BLOCKED_BY_ROBOTS`
 - **Useful discovery** — soft-404 fingerprinting, redirect chains, retries with backoff
@@ -109,6 +111,12 @@ scrapit --target https://example.com \
 `--yes` skips interactive confirmations. It does **not** replace `--i-have-permission`, which must be
 passed explicitly for non-interactive runs.
 
+Auto-scrape (no paths file — crawl the site instead):
+
+```bash
+scrapit --target https://example.com --discover --depth 3 --yes --i-have-permission
+```
+
 ## Interactive TUI
 
 ```
@@ -116,17 +124,19 @@ passed explicitly for non-interactive runs.
  │ Target : https://example.com (93.184...)   │
  │ Paths  : paths.txt (12 loaded)             │
  │ Output : output                            │
- └────────────────────────────────────────────┘
+ │ Mode   : paths file                        │
+ └─ by @S4rtx - polite path fetcher ──────────┘
  1. Set target URL
  2. Load paths file (.txt)
- 3. Settings
- 4. Preview URLs that will be requested
- 5. Start fetching
- 6. View last results
- 7. Export report / ZIP the downloads
- 8. Help / About
- 9. Check for updates
- 10. Exit
+ 3. Auto-scrape this site (no paths file)
+ 4. Settings
+ 5. Preview URLs that will be requested
+ 6. Start fetching
+ 7. View last results
+ 8. Export report / ZIP the downloads
+ 9. Help / About
+ 10. Check for updates
+ 11. Exit
 ```
 
 What each option does:
@@ -135,14 +145,39 @@ What each option does:
 | --- | --- |
 | Set target URL | Normalizes `example.com` to `https://example.com`, drops path/query, resolves the IP |
 | Load paths file | Parses/cleans paths, reports duplicates/skips, previews the first 10 |
-| Settings | Delay, timeout, retries, redirects, size cap, robots, UA, headers, TLS, output, assets, private targets, path cap |
-| Preview URLs | Table of every final URL and the planned request count |
+| Auto-scrape | One step: asks for the target, then crawls it (links + sitemaps) without a paths file |
+| Settings | Delay, timeout, retries, redirects, size cap, robots, UA, headers, TLS, output, assets, private targets, path cap, discovery mode, crawl depth, sitemaps |
+| Preview URLs | Table of every final URL and the planned request count (discovery mode shows starting points) |
 | Start fetching | Scope confirmation, an optional run name for the output folder, then the sequential fetch with live progress |
 | View last results | Rich table loaded from the latest `results.json` |
 | Export | Regenerates reports and creates a ZIP of the run folder |
 | Help | Version, author, paths-file format and status-color legend |
 | Check for updates | Compares with the newest GitHub release/tag and can `git pull --ff-only` |
 | Exit | Confirmation, then clean exit |
+
+### Auto-scrape mode
+
+Instead of supplying a paths file, scrapit can discover paths itself:
+
+1. It requests the start path (`/` by default) plus `robots.txt`.
+2. It reads any `Sitemap:` entries from `robots.txt` and `/sitemap.xml`, and queues those URLs.
+3. For every HTML page it downloads, it extracts same-host `<a>`/`<area>`/`<form>`/`<iframe>` targets
+   and queues them breadth-first.
+4. It keeps going until the crawl depth, the path cap, or the queue runs out.
+
+Auto-scrape still respects every safety control: the typed-hostname confirmation, the private-IP
+policy, redirect re-checks, the request cap and robots.txt (disallowed links are never queued).
+Non-HTML assets, off-host links and non-http(s) schemes are ignored.
+
+From the CLI:
+
+```bash
+scrapit --target https://example.com --discover --depth 3 --yes --i-have-permission
+```
+
+`--depth` controls how many link hops to follow (`0` = only the start page), and `--no-sitemap`
+stops it seeding the crawl from sitemaps. `--paths` still works alongside `--discover`: the listed
+paths become extra starting points.
 
 Ctrl+C during a run stops it cleanly, keeps partial results, writes the reports, and returns to the
 menu. Ctrl+C at the menu exits gracefully.
@@ -172,6 +207,9 @@ scrapit [--target URL] [--paths FILE] [flags]
 | `--max-paths N` | Request cap per run (default `500`) |
 | `--zip` | ZIP the run folder at the end |
 | `--name NAME` | Name for this run, used as a prefix on the output folder |
+| `--discover` | Auto mode: crawl from the target instead of using a paths file |
+| `--depth N` | Link-following depth in discovery mode (default `3`) |
+| `--no-sitemap` | Do not seed the crawl from sitemaps |
 | `--yes` | Skip interactive confirmations (not the permission flag) |
 | `--i-have-permission` | Explicit authorization confirmation (required non-interactively) |
 | `--debug` | Show a traceback for unexpected errors |
@@ -280,9 +318,11 @@ config.py  ── validated Config dataclass
       │
 paths.py   ── load, clean, dedupe paths
       │
+discovery.py ── links, sitemaps, crawl seeds (auto-scrape mode)
+      │
 safety.py  ── scope confirmation, DNS/IP policy, robots.txt rules
       │
-fetcher.py ── sequential GETs, retries, redirects, soft-404, assets, live UI
+fetcher.py ── sequential GETs, crawl queue, retries, redirects, soft-404, assets, live UI
       │            │
       │            ▼
       │        storage.py  ── safe file/header layout, ZIP
@@ -296,6 +336,7 @@ report.py  ── results.json / results.csv / report.md + rich summary
 | `scrapit/menu.py` | Interactive menu, questionary + numbered fallback, settings |
 | `scrapit/config.py` | Defaults and validation |
 | `scrapit/paths.py` | Paths-file parsing and normalization |
+| `scrapit/discovery.py` | Link/sitemap extraction and crawl seeds for auto-scrape mode |
 | `scrapit/safety.py` | Scope confirmation, IP policy, robots rules |
 | `scrapit/fetcher.py` | HTTP loop, retries, redirects, soft-404, assets, run orchestration |
 | `scrapit/storage.py` | Run folder layout, sanitization, safe writes, ZIP |

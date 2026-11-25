@@ -15,7 +15,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from . import __version__, report
+from . import __author__, __version__, report
 from .config import Config, ConfigError
 from .fetcher import RunSummary, run_session
 from .paths import PathFileError, PathLoadResult, load_paths
@@ -188,14 +188,15 @@ class MenuApp:
                 [
                     ("1. Set target URL", "target"),
                     ("2. Load paths file (.txt)", "paths"),
-                    ("3. Settings", "settings"),
-                    ("4. Preview URLs that will be requested", "preview"),
-                    ("5. Start fetching", "start"),
-                    ("6. View last results", "results"),
-                    ("7. Export report / ZIP the downloads", "export"),
-                    ("8. Help / About", "help"),
-                    ("9. Check for updates", "update"),
-                    ("10. Exit", "exit"),
+                    ("3. Auto-scrape this site (no paths file)", "auto"),
+                    ("4. Settings", "settings"),
+                    ("5. Preview URLs that will be requested", "preview"),
+                    ("6. Start fetching", "start"),
+                    ("7. View last results", "results"),
+                    ("8. Export report / ZIP the downloads", "export"),
+                    ("9. Help / About", "help"),
+                    ("10. Check for updates", "update"),
+                    ("11. Exit", "exit"),
                 ],
                 default="target",
             )
@@ -214,6 +215,8 @@ class MenuApp:
                     self._set_target()
                 elif choice == "paths":
                     self._load_paths()
+                elif choice == "auto":
+                    self._auto_scrape()
                 elif choice == "settings":
                     self._settings()
                 elif choice == "preview":
@@ -252,10 +255,21 @@ class MenuApp:
         body = (
             f"[bold]Target :[/bold] {target_text}\n"
             f"[bold]Paths  :[/bold] {paths_text}\n"
-            f"[bold]Output :[/bold] {escape(str(self.config.output_dir))}"
+            f"[bold]Output :[/bold] {escape(str(self.config.output_dir))}\n"
+            f"[bold]Mode   :[/bold] "
+            + (
+                f"[green]auto-scrape[/green] [dim](depth {self.config.max_depth})[/dim]"
+                if self.config.discover
+                else "[dim]paths file[/dim]"
+            )
         )
         self.console.print(
-            Panel(Text.from_markup(body), title="SCRAPIT", subtitle="polite path fetcher", border_style="cyan")
+            Panel(
+                Text.from_markup(body),
+                title="SCRAPIT",
+                subtitle=f"by @{__author__} - polite path fetcher",
+                border_style="cyan",
+            )
         )
 
     # -- actions ------------------------------------------------------------------
@@ -325,7 +339,10 @@ class MenuApp:
                     (f"12. Download linked assets: {'on' if cfg.download_assets else 'off'}", "assets"),
                     (f"13. Allow localhost/private targets: {'on' if cfg.allow_private else 'off'}", "private"),
                     (f"14. Max paths per run: {cfg.max_paths}", "max_paths"),
-                    ("15. Back", "back"),
+                    (f"15. Discovery mode: {'on' if cfg.discover else 'off'}", "discover"),
+                    (f"16. Crawl depth: {cfg.max_depth}", "depth"),
+                    (f"17. Use sitemaps when discovering: {'on' if cfg.use_sitemap else 'off'}", "sitemap"),
+                    ("18. Back", "back"),
                 ],
                 default="back",
             )
@@ -460,6 +477,29 @@ class MenuApp:
                 self.console.print("[red]Enter a whole number.[/red]")
                 return
             cfg.warn_paths = min(cfg.warn_paths, cfg.max_paths)
+        elif choice == "discover":
+            answer = confirm(
+                self.console,
+                "Enable discovery mode (crawl links instead of using a paths file)?",
+                cfg.discover,
+            )
+            if answer is None:
+                return
+            cfg.discover = answer
+        elif choice == "depth":
+            raw = text(self.console, "Crawl depth (0-10)", default=str(cfg.max_depth))
+            if raw is None:
+                return
+            try:
+                cfg.max_depth = int(raw)
+            except ValueError:
+                self.console.print("[red]Enter a whole number.[/red]")
+                return
+        elif choice == "sitemap":
+            answer = confirm(self.console, "Seed the crawl from sitemaps?", cfg.use_sitemap)
+            if answer is None:
+                return
+            cfg.use_sitemap = answer
         else:
             return
 
@@ -475,6 +515,21 @@ class MenuApp:
         if not self._require_ready():
             return
         assert self.target is not None
+        if self.config.discover:
+            seeds = self.paths or ["/"]
+            lines = "\n".join(f"  {escape(url)}" for url in seeds[:10])
+            self.console.print(
+                Panel(
+                    Text.from_markup(
+                        f"[bold]Discovery mode is on[/bold] - starting points:\n{lines}\n"
+                        f"[dim]These are the start only; live links are followed up to depth "
+                        f"{self.config.max_depth}. Preview cannot list them in advance.[/dim]"
+                    ),
+                    title="Preview (auto-scrape)",
+                    border_style="cyan",
+                )
+            )
+            return
         urls = [build_url(self.target, path) for path in self.paths]
         table = Table(title=f"Preview ({len(urls)} URL(s))", header_style="bold")
         table.add_column("#", justify="right", style="dim")
@@ -518,10 +573,68 @@ class MenuApp:
         summary = run_session(
             self.config,
             self.target,
-            self.paths,
+            self.paths or ["/"],
             self.console,
             assume_yes=self.assume_yes,
             run_name=run_name,
+            discover_paths=self.config.discover,
+        )
+        if summary is not None:
+            self.last_run = summary
+
+    def _auto_scrape(self) -> None:
+        """One-step automation: ask for a URL, then crawl and report without a paths file."""
+        self.console.print(
+            Panel(
+                Text.from_markup(
+                    "[bold]Auto-scrape[/bold]\n"
+                    "Give a target and scrapit will request the home page plus robots.txt and any sitemap, "
+                    "then follow same-host links up to the crawl depth. No paths file needed.\n"
+                    "[dim]Only use this on a site you own or are explicitly authorized to test.[/dim]"
+                ),
+                title="Auto-scrape",
+                border_style="cyan",
+            )
+        )
+        raw = text(self.console, "Target base URL", default=self.target or "")
+        if raw is None:
+            self.console.print("[yellow]Cancelled.[/yellow]")
+            return
+        raw = raw.strip()
+        if not raw:
+            if not self.target:
+                self.console.print("[yellow]No target set.[/yellow]")
+                return
+        elif not self._assign_target(raw):
+            return
+
+        try:
+            self.config.validate()
+        except ConfigError as exc:
+            self.console.print(Panel(f"[red]{escape(str(exc))}[/red]", title="Invalid settings", border_style="red"))
+            return
+
+        assert self.target is not None
+        run_name = self.run_name
+        if run_name is None and not self.assume_yes:
+            answer = text(
+                self.console,
+                "Name for this run (optional; appears in the output folder name)",
+                default="",
+            )
+            if answer is None:
+                self.console.print("[yellow]Cancelled.[/yellow]")
+                return
+            run_name = answer.strip() or None
+
+        summary = run_session(
+            self.config,
+            self.target,
+            ["/"],
+            self.console,
+            assume_yes=self.assume_yes,
+            run_name=run_name,
+            discover_paths=True,
         )
         if summary is not None:
             self.last_run = summary
@@ -657,9 +770,12 @@ class MenuApp:
             Panel(
                 Text.from_markup(
                     f"[bold]scrapit {__version__}[/bold]\n"
-                    f"[dim]by @S4rtx - https://github.com/{DEFAULT_REPO}[/dim]\n\n"
+                    f"[dim]by @{__author__} - https://github.com/{DEFAULT_REPO}[/dim]\n\n"
                     "Sends one polite GET request per path, sequentially, and saves whatever it finds. "
                     "No authentication bypass, header spoofing, proxying or form submission is attempted.\n\n"
+                    "[bold]Auto-scrape[/bold] - option 3 (or --discover) crawls the target instead of using a "
+                    "paths file: it reads robots.txt and sitemaps, then follows same-host links up to the "
+                    "crawl depth. Off-host links, assets and non-http(s) schemes are ignored.\n\n"
                     "[bold]Paths file[/bold] - one path per line. Blank lines and lines starting with # are ignored. "
                     "A leading slash is added when missing. Full URLs are accepted only when their host matches "
                     "the target. Exact duplicates are removed and order is preserved.\n\n"
@@ -695,7 +811,9 @@ class MenuApp:
         if not self.target:
             self.console.print("[yellow]Set a target URL first (option 1).[/yellow]")
             return False
-        if not self.paths:
-            self.console.print("[yellow]Load a paths file first (option 2).[/yellow]")
+        if not self.paths and not self.config.discover:
+            self.console.print(
+                "[yellow]Load a paths file first (option 2), or turn on Auto-scrape (option 3).[/yellow]"
+            )
             return False
         return True

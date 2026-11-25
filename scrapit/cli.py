@@ -86,6 +86,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--zip", action="store_true", help="Create a ZIP of the run folder")
     parser.add_argument("--name", dest="run_name", help="Name for this run (used in the output folder name)")
     parser.add_argument(
+        "--discover",
+        action="store_true",
+        help="Auto mode: crawl from the target and follow same-host links without a paths file",
+    )
+    parser.add_argument(
+        "--depth",
+        type=int,
+        help="Maximum link-following depth in discovery mode (default 3)",
+    )
+    parser.add_argument("--no-sitemap", action="store_true", help="Do not seed the crawl from sitemaps")
+    parser.add_argument(
         "--yes",
         action="store_true",
         help="Skip interactive confirmations (does NOT replace --i-have-permission)",
@@ -135,6 +146,12 @@ def config_from_args(args: argparse.Namespace) -> Config:
     if args.max_paths is not None:
         config.max_paths = args.max_paths
         config.warn_paths = min(config.warn_paths, config.max_paths)
+    if args.discover:
+        config.discover = True
+    if args.depth is not None:
+        config.max_depth = args.depth
+    if args.no_sitemap:
+        config.use_sitemap = False
     return config
 
 
@@ -148,7 +165,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         config = config_from_args(args)
-        direct = bool(args.target and args.paths_file and (args.i_have_permission or args.yes))
+        direct = bool(args.target and (args.paths_file or config.discover) and (args.i_have_permission or args.yes))
 
         if direct:
             if not args.i_have_permission:
@@ -162,21 +179,25 @@ def main(argv: list[str] | None = None) -> int:
                     )
                 )
                 return 2
-            try:
-                loaded = load_paths(args.paths_file, args.target)
-            except PathFileError as exc:
-                console.print(Panel(f"[red]{exc}[/red]", title="Paths error", border_style="red"))
-                return 2
+            paths: list[str] = ["/"]
+            if args.paths_file:
+                try:
+                    loaded = load_paths(args.paths_file, args.target)
+                except PathFileError as exc:
+                    console.print(Panel(f"[red]{exc}[/red]", title="Paths error", border_style="red"))
+                    return 2
+                paths = loaded.paths
             summary = run_session(
                 config,
                 args.target,
-                loaded.paths,
+                paths,
                 console,
                 assume_yes=args.yes,
                 i_have_permission=True,
                 interactive=sys.stdin.isatty(),
                 create_zip=args.zip,
                 run_name=args.run_name,
+                discover_paths=config.discover,
             )
             return 0 if summary is not None else 2
 

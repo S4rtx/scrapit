@@ -33,6 +33,9 @@ class Config:
     warn_paths: int = 200
     max_redirects: int = 10
     max_assets_per_page: int = 50
+    discover: bool = False
+    max_depth: int = 3
+    use_sitemap: bool = True
 
     def __post_init__(self) -> None:
         self.output_dir = Path(self.output_dir).expanduser()
@@ -123,6 +126,17 @@ class Config:
         else:
             if not 0 <= self.max_assets_per_page <= 200:
                 errors.append("Max assets per page must be between 0 and 200.")
+
+        try:
+            self.max_depth = int(self.max_depth)
+        except (TypeError, ValueError):
+            errors.append("Crawl depth must be an integer.")
+        else:
+            if not 0 <= self.max_depth <= 10:
+                errors.append("Crawl depth must be between 0 and 10.")
+
+        self.discover = bool(self.discover)
+        self.use_sitemap = bool(self.use_sitemap)
 
         if not str(self.output_dir).strip():
             errors.append("Output folder must not be empty.")

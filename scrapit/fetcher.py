@@ -8,6 +8,7 @@ import logging
 import socket
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
@@ -32,6 +33,7 @@ from rich.text import Text
 
 from . import report
 from .config import Config, ConfigError
+from .discovery import extract_links, path_of, robots_sitemaps, sitemap_locations
 from .safety import (
     RobotsRules,
     SafetyError,
@@ -180,6 +182,7 @@ class LiveDisplay:
         self.table = self._make_table()
         self.rows: list[FetchResult] = []
         self._index = 0
+        self.indeterminate = False
         self._lock = threading.RLock()
         self.live = Live(Group(self.progress, self.table), console=console, refresh_per_second=6)
 
@@ -208,12 +211,19 @@ class LiveDisplay:
 
     def path_started(self, index: int, total: int, path: str) -> None:
         self._index = index
-        self.progress.update(
-            self.task,
-            total=max(total, 1),
-            completed=index - 1,
-            description=f"[cyan]{escape(path[:60])}[/cyan]",
-        )
+        if self.indeterminate:
+            self.progress.update(
+                self.task,
+                total=None,
+                description=f"[cyan]{escape(path[:60])}[/cyan] [dim]{index} visited[/dim]",
+            )
+        else:
+            self.progress.update(
+                self.task,
+                total=max(total, 1),
+                completed=index - 1,
+                description=f"[cyan]{escape(path[:60])}[/cyan]",
+            )
         if not self.enabled:
             self.console.print(f"[dim]({index}/{total})[/dim] {escape(path)}")
 
@@ -222,7 +232,7 @@ class LiveDisplay:
             self.rows.append(result)
             if len(self.rows) > 12:
                 self.rows = self.rows[-12:]
-            if result.asset_of is None:
+            if result.asset_of is None and not self.indeterminate:
                 self.progress.update(self.task, completed=self._index)
             self._rebuild()
         if not self.enabled:
@@ -289,6 +299,7 @@ class Scrapit:
         self.results: list[FetchResult] = []
         self.requests_sent = 0
         self.robots: RobotsRules = RobotsRules.allow_all("robots.txt not checked")
+        self.robots_text = ""
         self.soft_fingerprint: tuple[int, int, str] | None = None
         self.soft404_note = "disabled"
         self.started_at = ""
@@ -455,11 +466,16 @@ class Scrapit:
             self.robots = RobotsRules.allow_all("disabled in settings")
             return
 
+        captured: list[bytes] = []
+
         def fetch(url: str) -> tuple[int | None, bytes, str]:
             outcome = self._perform(url)
+            if outcome.status == 200 and outcome.body:
+                captured.append(outcome.body)
             return outcome.status, outcome.body, ""
 
         self.robots = load_robots(fetch, self.base)
+        self.robots_text = captured[0].decode("utf-8", "replace") if captured else ""
         self.logger.info("robots.txt: %s", self.robots.note)
 
     def _probe_soft404(self) -> None:
@@ -563,7 +579,7 @@ class Scrapit:
 
             if (
                 not is_asset
-                and self.config.download_assets
+                and (self.config.download_assets or self.config.discover)
                 and "html" in (outcome.content_type or "").lower()
             ):
                 result.body = outcome.body
@@ -624,48 +640,168 @@ class Scrapit:
         try:
             self._prepare_robots()
             self._probe_soft404()
-            total = len(self.paths)
-            for index, path in enumerate(self.paths, 1):
-                self._emit(on_path_start, index, total, path)
-                try:
-                    url = build_url(self.base, path)
-                except ValueError as exc:
-                    result = FetchResult(
-                        path=path,
-                        url=path,
-                        label="NETWORK_ERROR",
-                        error=f"Could not build URL: {exc}",
-                    )
-                else:
-                    result = self._fetch_one(path, url)
-                self.results.append(result)
-                self._log_result(result)
-                self._emit(on_result, result)
-
-                if result.label == "FOUND" and result.body is not None:
-                    try:
-                        assets = self._extract_assets(result.body, result.final_url or result.url)
-                    except Exception:  # noqa: BLE001 - asset discovery must never abort a run
-                        self.logger.debug("Asset discovery failed", exc_info=True)
-                        assets = []
-                    result.body = None
-                    for asset_url in assets:
-                        asset_path = self._asset_target(asset_url)
-                        asset_result = self._fetch_one(
-                            asset_path,
-                            asset_url,
-                            is_asset=True,
-                            asset_of=result.path,
-                        )
-                        self.results.append(asset_result)
-                        self._log_result(asset_result)
-                        self._emit(on_result, asset_result)
+            if self.config.discover:
+                self._run_discovery(on_result, on_path_start)
+            else:
+                self._run_paths(on_result, on_path_start)
         except KeyboardInterrupt:
             self.stopped = True
             self.logger.warning("Interrupted by user; partial results retained")
         finally:
             self.duration = time.perf_counter() - started
             self.finished_at = now_iso()
+
+    def _run_paths(
+        self,
+        on_result: Callable[[FetchResult], None] | None,
+        on_path_start: Callable[[int, int, str], None] | None,
+    ) -> None:
+        total = len(self.paths)
+        for index, path in enumerate(self.paths, 1):
+            self._emit(on_path_start, index, total, path)
+            result = self._fetch_path(path)
+            self._emit(on_result, result)
+            self._download_assets(result, on_result)
+
+    def _run_discovery(
+        self,
+        on_result: Callable[[FetchResult], None] | None,
+        on_path_start: Callable[[int, int, str], None] | None,
+    ) -> None:
+        """Crawl from the start paths, following same-host links breadth-first up to max_depth."""
+        queued: set[str] = set()
+        queue: deque[tuple[str, int]] = deque()
+
+        def enqueue(path: str, depth: int) -> None:
+            normalized = path or "/"
+            if normalized in queued:
+                return
+            if len(queued) >= self.config.max_paths:
+                return
+            queued.add(normalized)
+            queue.append((normalized, depth))
+
+        start_paths = self.paths or ["/"]
+        for path in start_paths:
+            enqueue(path, 0)
+
+        if self.config.use_sitemap:
+            for sitemap_path in self._sitemap_paths():
+                enqueue(sitemap_path, 0)
+
+        discovered = 0
+        seen_discovered: set[str] = set()
+
+        while queue:
+            path, depth = queue.popleft()
+            self._emit(on_path_start, len(self.results) + 1, len(queued), path)
+            result = self._fetch_path(path)
+            self._emit(on_result, result)
+
+            if (
+                depth < self.config.max_depth
+                and result.label == "FOUND"
+                and "html" in (result.content_type or "").lower()
+                and result.body
+            ):
+                try:
+                    links = extract_links(
+                        result.body,
+                        result.final_url or result.url,
+                        self.base,
+                        limit=self.config.max_assets_per_page,
+                    )
+                except Exception:  # noqa: BLE001 - link discovery must never abort a crawl
+                    self.logger.debug("Link discovery failed", exc_info=True)
+                    links = []
+                for link in links:
+                    target = path_of(link)
+                    if target not in seen_discovered:
+                        seen_discovered.add(target)
+                        discovered += 1
+                    enqueue(target, depth + 1)
+
+            self._download_assets(result, on_result)
+
+        self.logger.info("Discovery finished: %s path(s), %s discovered link(s)", len(queued), discovered)
+
+    def _download_assets(
+        self,
+        result: FetchResult,
+        on_result: Callable[[FetchResult], None] | None,
+    ) -> None:
+        if not self.config.download_assets or result.label != "FOUND" or result.body is None:
+            result.body = None
+            return
+        try:
+            assets = self._extract_assets(result.body, result.final_url or result.url)
+        except Exception:  # noqa: BLE001 - asset discovery must never abort a run
+            self.logger.debug("Asset discovery failed", exc_info=True)
+            assets = []
+        result.body = None
+        for asset_url in assets:
+            asset_path = self._asset_target(asset_url)
+            asset_result = self._fetch_one(
+                asset_path,
+                asset_url,
+                is_asset=True,
+                asset_of=result.path,
+            )
+            self.results.append(asset_result)
+            self._log_result(asset_result)
+            self._emit(on_result, asset_result)
+
+    def _fetch_path(self, path: str) -> FetchResult:
+        try:
+            url = build_url(self.base, path)
+        except ValueError as exc:
+            result = FetchResult(
+                path=path,
+                url=path,
+                label="NETWORK_ERROR",
+                error=f"Could not build URL: {exc}",
+            )
+        else:
+            result = self._fetch_one(path, url)
+        self.results.append(result)
+        self._log_result(result)
+        return result
+
+    def _sitemap_paths(self) -> list[str]:
+        """Ask robots.txt for sitemaps plus /sitemap.xml, and return their paths."""
+        candidates: list[str] = []
+
+        def fetch(url: str) -> tuple[int | None, bytes, str]:
+            outcome = self._perform(url)
+            return outcome.status, outcome.body, ""
+
+        robots_text = self.robots_text
+        if robots_text:
+            candidates.extend(robots_sitemaps(robots_text, self.base))
+
+        candidates.append(build_url(self.base, "/sitemap.xml"))
+
+        paths: list[str] = []
+        seen: set[str] = set()
+        for sitemap_url in candidates:
+            if sitemap_url in seen:
+                continue
+            seen.add(sitemap_url)
+            try:
+                status, body, _reason = fetch(sitemap_url)
+            except (SafetyError, FetchError):
+                continue
+            except Exception:  # noqa: BLE001 - sitemap probing is best effort
+                self.logger.debug("Sitemap fetch failed for %s", sitemap_url, exc_info=True)
+                continue
+            if status != 200 or not body:
+                continue
+            text = body.decode("utf-8", "replace")
+            for location in sitemap_locations(text, sitemap_url, self.base):
+                candidate_path = path_of(location)
+                if candidate_path not in paths:
+                    paths.append(candidate_path)
+        return paths
 
     def _log_result(self, result: FetchResult) -> None:
         self.logger.info(
@@ -703,9 +839,13 @@ def run_session(
     run_name: str | None = None,
     resolver: Resolver | None = None,
     client: httpx.Client | None = None,
+    discover_paths: bool = False,
 ) -> RunSummary | None:
     """Confirm scope, fetch, save reports and return a summary (or None if cancelled)."""
     console = console or Console()
+    discovering = discover_paths or config.discover
+    if discovering:
+        config.discover = True
 
     try:
         base = normalize_url(target_url)
@@ -714,8 +854,10 @@ def run_session(
         return None
 
     if not paths:
-        console.print(Panel("[red]No paths loaded.[/red]", title="Nothing to do", border_style="red"))
-        return None
+        if not discovering:
+            console.print(Panel("[red]No paths loaded.[/red]", title="Nothing to do", border_style="red"))
+            return None
+        paths = ["/"]
 
     try:
         config.validate()
@@ -723,7 +865,7 @@ def run_session(
         console.print(Panel(f"[red]{escape(str(exc))}[/red]", title="Invalid settings", border_style="red"))
         return None
 
-    if len(paths) > config.max_paths:
+    if not discovering and len(paths) > config.max_paths:
         console.print(
             Panel(
                 f"[red]Refusing to send {len(paths)} requests (cap is {config.max_paths}).[/red]\n"
@@ -752,6 +894,12 @@ def run_session(
 
     request_count = estimate_requests(len(paths), config.respect_robots)
 
+    if discovering:
+        console.print(
+            f"[dim]Discovery mode: starting from {', '.join(paths)}, following same-host links "
+            f"up to depth {config.max_depth} (cap {config.max_paths} paths"
+            f"{', sitemaps enabled' if config.use_sitemap else ''}).[/dim]"
+        )
     if not i_have_permission:
         if not interactive:
             console.print(
@@ -765,7 +913,13 @@ def run_session(
             return None
         console.print(
             Panel(
-                scope_message(base, request_count, ip),
+                scope_message(base, request_count, ip)
+                + (
+                    f"\nDiscovery mode will also follow links on the site (depth {config.max_depth}, "
+                    f"up to {config.max_paths} paths)."
+                    if discovering
+                    else ""
+                ),
                 title="Scope confirmation",
                 border_style="yellow",
             )
@@ -783,12 +937,16 @@ def run_session(
             )
             return None
     else:
+        planned = (
+            f"up to {config.max_paths} path(s) will be visited by crawling"
+            if discovering
+            else f"{request_count} request(s) planned"
+        )
         console.print(
-            f"[dim]Permission confirmed for {host} ({ip}) via --i-have-permission; "
-            f"{request_count} request(s) planned.[/dim]"
+            f"[dim]Permission confirmed for {host} ({ip}) via --i-have-permission; {planned}.[/dim]"
         )
 
-    if len(paths) > config.warn_paths and not assume_yes:
+    if not discovering and len(paths) > config.warn_paths and not assume_yes:
         proceed = _confirm(
             console,
             f"{len(paths)} paths is above the {config.warn_paths}-path warning threshold. Continue?",
@@ -811,9 +969,11 @@ def run_session(
 
     logger = setup_logging(storage.run_dir / "scrapit.log", storage.host_dir / "scrapit.log")
     logger.info(
-        "Run start: target=%s paths=%s delay=%s robots=%s allow_private=%s",
+        "Run start: target=%s paths=%s discover=%s depth=%s delay=%s robots=%s allow_private=%s",
         base,
         len(paths),
+        discovering,
+        config.max_depth,
         config.delay,
         config.respect_robots,
         config.allow_private,
@@ -829,7 +989,8 @@ def run_session(
         resolver=resolver,
         console=console,
     )
-    display = LiveDisplay(console, len(paths))
+    display = LiveDisplay(console, 0 if discovering else len(paths))
+    display.indeterminate = discovering
     display.start()
     try:
         fetcher.run(on_result=display.add, on_path_start=display.path_started)
@@ -854,6 +1015,7 @@ def run_session(
         robots_note=fetcher.robots.note,
         soft404_note=fetcher.soft404_note,
         paths_loaded=len(paths),
+        discovery=config.discover,
         redirect_chains=sum(1 for item in fetcher.results if item.redirect_chain),
         results=[item.to_dict() for item in fetcher.results],
     )
