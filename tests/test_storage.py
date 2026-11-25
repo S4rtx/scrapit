@@ -13,7 +13,7 @@ def storage(tmp_path):
 
 
 def test_layout_created(storage):
-    assert storage.run_dir.parts[-3:] == ("output", "example.com", "2026-11-25_14-30-05")
+    assert storage.run_dir.parts[-3:] == ("output", "example.com", "S4rtx_2026-11-25_14-30-05")
     assert storage.files_dir.is_dir()
     assert storage.headers_dir.is_dir()
 
@@ -145,7 +145,7 @@ def test_run_name_prefixes_run_folder(tmp_path):
         timestamp="2026-11-25_14-30-05",
         run_name="evening-scan",
     )
-    assert storage.run_dir.name == "evening-scan_2026-11-25_14-30-05"
+    assert storage.run_dir.name == "S4rtx_evening-scan_2026-11-25_14-30-05"
 
 
 def test_blank_run_name_falls_back_to_timestamp(tmp_path):
@@ -155,4 +155,11 @@ def test_blank_run_name_falls_back_to_timestamp(tmp_path):
         timestamp="2026-11-25_14-30-05",
         run_name="   ",
     )
-    assert storage.run_dir.name == "2026-11-25_14-30-05"
+    assert storage.run_dir.name == "S4rtx_2026-11-25_14-30-05"
+
+
+def test_zip_archive_keeps_author_prefix(storage):
+    storage.save("/admin", "text/html", b"hi", "u", "u", 200, [])
+    archive = storage.zip_run()
+    assert archive.name == storage.run_dir.name + ".zip"
+    assert archive.name.startswith("S4rtx_")

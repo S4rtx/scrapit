@@ -9,7 +9,9 @@ from pathlib import Path
 
 import httpx
 
-GITHUB_USER = "S4rtx"
+from . import __author__
+
+GITHUB_USER = __author__
 DEFAULT_REPO = f"{GITHUB_USER}/scrapit"
 GITHUB_API = "https://api.github.com"
 FALLBACK_INSTALL = f"pip install --upgrade git+https://github.com/{DEFAULT_REPO}.git"

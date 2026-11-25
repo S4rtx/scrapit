@@ -31,7 +31,8 @@ flagged CLI for repeatable runs.
 - **Audit trail** — every request logged to `output/<host>/scrapit.log`
 - **Two interfaces** — arrow-key TUI plus scriptable flags
 - **Self-updating** — on launch it notifies you when a newer GitHub release exists and offers to update; `--check-updates` / `--update` do the same from the CLI
-- **Named runs** — optionally name each run so its output folder is easy to find
+- **Named runs** — optionally name each run so its output folder is easy to find; every run folder
+  and ZIP is prefixed with the author handle (`S4rtx_…`) and reports record `@S4rtx` as the author
 - **No bypass features** — no auth bypass, WAF evasion, UA spoofing, proxying or form submission
 
 ## Requirements
@@ -210,8 +211,8 @@ Parsing rules:
 ```text
 output/
 └── example.com/
-    ├── scrapit.log                     # append-only audit log (every request)
-    └── 2026-11-25_14-30-05/            # or <name>_2026-11-25_14-30-05/ with --name
+    ├── scrapit.log                            # append-only audit log (every request)
+    └── S4rtx_2026-11-25_14-30-05/             # or S4rtx_<name>_2026-11-25_14-30-05/ with --name
         ├── files/
         │   ├── admin/index.html
         │   ├── js/index.html
@@ -224,9 +225,10 @@ output/
         ├── results.json
         ├── results.csv
         ├── report.md
-        └── scrapit.log                 # detailed DEBUG log
+        └── scrapit.log                        # detailed DEBUG log
 ```
 
+- Every run folder is prefixed with the author name (`S4rtx`), and the ZIP archive uses the same name.
 - Directory-like paths become `<path>/index.<ext>`; files keep their own extension.
 - The extension comes from `Content-Type` when the path has none.
 - Query strings add a short hash (`page_ab12cd.html`) so different URLs do not overwrite each other.
@@ -247,7 +249,7 @@ A final panel shows the counts and output folder:
 ```text
 Done in 14.2s
 Found: 5   Redirects: 2   Protected: 1   Not found: 4   Errors: 0   Blocked by robots: 1
-Saved to: output/example.com/2026-11-25_14-30-05/
+Saved to: output/example.com/S4rtx_2026-11-25_14-30-05/
 ```
 
 ## Safety model

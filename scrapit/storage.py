@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from . import __author__
 from .utils import (
     ext_from_content_type,
     has_extension,
@@ -49,6 +50,7 @@ class RunStorage:
         stamp = timestamp or time.strftime("%Y-%m-%d_%H-%M-%S")
         if run_name and run_name.strip():
             stamp = f"{sanitize_component(run_name.strip())}_{stamp}"
+        stamp = f"{sanitize_component(__author__)}_{stamp}"
         run_dir = self.host_dir / stamp
         counter = 2
         while run_dir.exists():

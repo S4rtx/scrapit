@@ -6,7 +6,7 @@ virtual environment activated.
 ## 0. Setup
 
 - [ ] `pip install -e ".[dev]"` completes without errors
-- [ ] `scrapit --version` prints `scrapit 2.2.0`
+- [ ] `scrapit --version` prints `scrapit 2.3.0`
 - [ ] `python -m scrapit --version` prints the same
 - [ ] `python -m pytest -q` passes
 
@@ -81,7 +81,7 @@ virtual environment activated.
 
 ## 7. Reports and output
 
-- [ ] The run folder appears under `output/<host>/<timestamp>/` (or `output/<host>/<name>_<timestamp>/`)
+- [ ] The run folder appears under `output/<host>/S4rtx_<timestamp>/` (or `output/<host>/S4rtx_<name>_<timestamp>/`)
 - [ ] `files/` contains the downloaded bodies
 - [ ] `headers/` contains one `.headers.txt` per saved file
 - [ ] `results.json`, `results.csv` and `report.md` exist

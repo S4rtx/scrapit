@@ -15,7 +15,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from . import __version__
+from . import __author__, __version__
 from .utils import human_bytes
 
 
@@ -112,6 +112,7 @@ def build_payload(
     return {
         "tool": "scrapit",
         "version": __version__,
+        "author": __author__,
         "target": target,
         "host": host,
         "run_dir": run_dir,
@@ -177,6 +178,8 @@ def results_to_markdown(payload: dict[str, Any]) -> str:
     lines: list[str] = [
         "# scrapit report",
         "",
+        f"**Author:** @{payload.get('author') or __author__}",
+        f"**Tool:** scrapit {payload.get('version')}",
         f"**Target:** {payload.get('target')}",
         f"**Host:** {payload.get('host')}",
         f"**Started:** {payload.get('started_at')}",
@@ -337,6 +340,7 @@ def render_summary(console: Console, payload: dict[str, Any], zip_path: Path | N
     counts = payload.get("counts", {})
     lines = [
         f"[bold green]Done in {payload.get('duration_s')}s[/bold green]",
+        f"[dim]scrapit by @{__author__} - https://github.com/{__author__}/scrapit[/dim]",
         (
             f"Found: [green]{counts.get('found', 0)}[/green]   "
             f"Redirects: [yellow]{counts.get('redirects', 0)}[/yellow]   "

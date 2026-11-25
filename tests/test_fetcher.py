@@ -407,6 +407,9 @@ def test_run_session_writes_reports(tmp_path, monkeypatch):
     data = json.loads((run_dir / "results.json").read_text(encoding="utf-8"))
     assert data["counts"]["found"] == 1
     assert data["target"] == "https://example.com"
+    assert data["author"] == "S4rtx"
+    assert run_dir.name.startswith("S4rtx_")
+    assert "**Author:** @S4rtx" in (run_dir / "report.md").read_text(encoding="utf-8")
     assert (run_dir / "files" / "admin" / "index.html").read_text() == "<h1>admin</h1>"
 
 
@@ -499,7 +502,7 @@ def test_run_session_uses_run_name(tmp_path):
         client=client,
     )
     assert summary is not None
-    assert summary.run_dir.name.startswith("evening scan_")
+    assert summary.run_dir.name.startswith("S4rtx_evening scan_")
     assert (summary.run_dir / "results.json").is_file()
 
 
