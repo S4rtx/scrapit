@@ -398,3 +398,45 @@ def render_report_meta(console: Console, payload: dict[str, Any]) -> None:
             border_style="cyan",
         )
     )
+
+
+def render_subdomain_summary(console, result, paths) -> None:
+    """Render the result of a subdomain enumeration run."""
+    from . import __author__
+    from .subdomains import SubdomainReport
+
+    assert isinstance(result, SubdomainReport)
+    lines = [
+        f"[bold green]{len(result.results)} subdomain(s) found[/bold green] for {escape(result.domain)}",
+        f"[dim]scrapit by @{__author__} - https://github.com/{__author__}/scrapit[/dim]",
+    ]
+    breakdown = ", ".join(f"{name} {count}" for name, count in sorted(result.source_counts.items()))
+    if breakdown:
+        lines.append(f"Sources: {breakdown}")
+    if result.bruteforced:
+        lines.append(f"Brute force: [green]{result.bruteforced}[/green] live name(s)")
+    if result.bruteforce_skipped:
+        lines.append("[yellow]Brute force skipped:[/yellow] rotating wildcard DNS would make every guess look real")
+    if result.wildcard:
+        lines.append(f"[yellow]Wildcard DNS:[/yellow] {escape(', '.join(result.wildcard))}")
+    for note in result.notes:
+        lines.append(f"[dim]{escape(note)}[/dim]")
+    lines.append(f"List: [bold]{escape(str(paths.get('txt')))}[/bold]")
+    if paths.get("stable"):
+        lines.append(f"Latest: [bold]{escape(str(paths['stable']))}[/bold]")
+    console.print(Panel(Text.from_markup("\n".join(lines)), title="Subdomain scan complete", border_style="green"))
+
+    if result.results:
+        table = Table(title=f"Subdomains ({len(result.results)})", header_style="bold")
+        table.add_column("Subdomain", style="cyan", no_wrap=True)
+        table.add_column("IPs", style="dim", max_width=40)
+        table.add_column("Found via", max_width=28)
+        for entry in result.results[:50]:
+            table.add_row(
+                escape(entry.name),
+                escape(", ".join(entry.ips) or "-"),
+                escape(", ".join(sorted(entry.sources))),
+            )
+        console.print(table)
+        if len(result.results) > 50:
+            console.print(f"[dim]... and {len(result.results) - 50} more in the output files.[/dim]")

@@ -6,17 +6,17 @@ virtual environment activated.
 ## 0. Setup
 
 - [ ] `pip install -e ".[dev]"` completes without errors
-- [ ] `scrapit --version` prints `scrapit 2.4.0`
+- [ ] `scrapit --version` prints `scrapit 2.5.0`
 - [ ] `python -m scrapit --version` prints the same
 - [ ] `python -m pytest -q` passes
 
 ## 1. Launch and menu
 
-- [ ] `scrapit` shows the banner, target/paths/output/mode summary, `by @S4rtx` and the eleven menu options
+- [ ] `scrapit` shows the banner, target/paths/output/mode summary, `by @S4rtx` and the twelve menu options
 - [ ] On launch the tool quietly checks GitHub; when a newer release exists it shows an update panel and asks whether to update
 - [ ] An offline launch stays quiet and still opens the menu
 - [ ] Arrow keys move the selection; Enter activates an option (questionary available)
-- [ ] Piping input (for example `printf '11\ny\n' | python -m scrapit`) uses the numbered fallback
+- [ ] Piping input (for example `printf '12\ny\n' | python -m scrapit`) uses the numbered fallback
 - [ ] Ordered numbers appear only once in the fallback menu
 - [ ] Exit asks for confirmation; `y` exits cleanly, `n` returns to the menu
 
@@ -67,6 +67,20 @@ virtual environment activated.
 - [ ] `--discover --depth N --no-sitemap` behaves the same on the CLI
 - [ ] `report.md` and `results.json` record `discovery: true` and the crawl depth
 - [ ] The progress bar stays indeterminate (no fake total) during a crawl
+
+## 4c. Subdomain finder
+
+- [ ] Option 4 asks for a domain and runs without needing a target or paths file
+- [ ] Passive sources report per-source counts; a failing source shows a warning, not a crash
+- [ ] Names reported by more than one source are merged and attributed to each
+- [ ] Brute force can be declined, in which case only passive sources run
+- [ ] Wildcard DNS is detected and wildcard-only brute-force hits are discarded
+- [ ] A custom wordlist replaces the built-in list
+- [ ] `output/<domain>/subdomains.txt`, `.csv` and `.json` are written, plus a stable copy in the domain folder
+- [ ] `subdomains.txt` is one host per line and can be reused as a targets list
+- [ ] `--subdomains DOMAIN --no-bruteforce` works non-interactively and exits 0 when names are found
+- [ ] `--output-file hosts.txt` writes an extra copy at the chosen path
+- [ ] The summary honestly states that not every subdomain can be found
 
 ## 5. Preview
 

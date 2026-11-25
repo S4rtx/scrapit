@@ -25,6 +25,8 @@ flagged CLI for repeatable runs.
 - **Sequential and polite** — one GET at a time, configurable delay, no concurrency
 - **Two ways to scan** — a paths file, or **auto-scrape** mode that crawls a site from its home page
   and sitemaps by following same-host links (no paths file needed)
+- **Subdomain finder** — combines public certificate-transparency / passive-DNS sources with DNS
+  brute force (plus wildcard-noise filtering) and writes a `subdomains.txt` list you can reuse
 - **Scope-aware** — typed-hostname confirmation, private-IP refusal, per-redirect IP re-checks
 - **robots.txt aware** — fetched once, disallowed paths marked `BLOCKED_BY_ROBOTS`
 - **Useful discovery** — soft-404 fingerprinting, redirect chains, retries with backoff
@@ -129,14 +131,15 @@ scrapit --target https://example.com --discover --depth 3 --yes --i-have-permiss
  1. Set target URL
  2. Load paths file (.txt)
  3. Auto-scrape this site (no paths file)
- 4. Settings
- 5. Preview URLs that will be requested
- 6. Start fetching
- 7. View last results
- 8. Export report / ZIP the downloads
- 9. Help / About
- 10. Check for updates
- 11. Exit
+ 4. Find subdomains (passive + brute force)
+ 5. Settings
+ 6. Preview URLs that will be requested
+ 7. Start fetching
+ 8. View last results
+ 9. Export report / ZIP the downloads
+ 10. Help / About
+ 11. Check for updates
+ 12. Exit
 ```
 
 What each option does:
@@ -146,6 +149,7 @@ What each option does:
 | Set target URL | Normalizes `example.com` to `https://example.com`, drops path/query, resolves the IP |
 | Load paths file | Parses/cleans paths, reports duplicates/skips, previews the first 10 |
 | Auto-scrape | One step: asks for the target, then crawls it (links + sitemaps) without a paths file |
+| Find subdomains | Queries CT/passive-DNS sources and brute-forces names, writing a reusable host list |
 | Settings | Delay, timeout, retries, redirects, size cap, robots, UA, headers, TLS, output, assets, private targets, path cap, discovery mode, crawl depth, sitemaps |
 | Preview URLs | Table of every final URL and the planned request count (discovery mode shows starting points) |
 | Start fetching | Scope confirmation, an optional run name for the output folder, then the sequential fetch with live progress |
@@ -210,6 +214,11 @@ scrapit [--target URL] [--paths FILE] [flags]
 | `--discover` | Auto mode: crawl from the target instead of using a paths file |
 | `--depth N` | Link-following depth in discovery mode (default `3`) |
 | `--no-sitemap` | Do not seed the crawl from sitemaps |
+| `--subdomains DOMAIN` | Find subdomains and exit (writes `subdomains.txt/csv/json`) |
+| `--wordlist FILE` | Wordlist for `--subdomains` brute force (default: built-in ~460 words) |
+| `--no-bruteforce` | Passive sources only for `--subdomains` |
+| `--workers N` | Parallel DNS lookups for brute force (default `20`) |
+| `--output-file FILE` | Extra copy of the subdomain list at a path you choose |
 | `--yes` | Skip interactive confirmations (not the permission flag) |
 | `--i-have-permission` | Explicit authorization confirmation (required non-interactively) |
 | `--debug` | Show a traceback for unexpected errors |
@@ -290,6 +299,61 @@ Found: 5   Redirects: 2   Protected: 1   Not found: 4   Errors: 0   Blocked by r
 Saved to: output/example.com/S4rtx_2026-11-25_14-30-05/
 ```
 
+## Subdomain finder
+
+Option **4. Find subdomains** (or `--subdomains DOMAIN`) enumerates subdomains and writes a list you
+can feed straight back into a scan.
+
+```bash
+scrapit --subdomains example.com                    # passive sources + built-in brute force
+scrapit --subdomains example.com --no-bruteforce    # passive sources only (fast, no DNS storm)
+scrapit --subdomains example.com --wordlist words.txt --workers 40
+scrapit --subdomains example.com --output-file hosts.txt
+```
+
+How it works, in order:
+
+1. **Passive sources** (no packets to the target). Queries public data:
+   - `crt.sh` — certificate transparency logs (usually the richest source)
+   - Cert Spotter — certificate transparency API
+   - HackerTarget — passive DNS (small anonymous quota)
+   - rapiddns.io — passive DNS aggregation
+
+   Each name is attributed to the sources that reported it, and duplicate hits are merged.
+2. **Wildcard detection** — resolves a few random labels; if they all answer, wildcard DNS is
+   recorded and used to filter noise.
+3. **DNS brute force** — resolves `word.domain` for a built-in ~460-word list (or your own file) in
+   parallel. Results that only resolve to the wildcard address are discarded, because those are
+   catch-all responses rather than real hosts.
+
+Output lands in `output/<domain>/<run>/` plus a stable copy at `output/<domain>/subdomains.txt`:
+
+| File | Contents |
+| --- | --- |
+| `subdomains.txt` | Plain list, one host per line — ready to reuse |
+| `subdomains.csv` | `subdomain,ips,sources` |
+| `subdomains.json` | Full detail: wildcard info, per-source counts, notes, IPs |
+
+### Honest coverage limits
+
+**No tool can find every subdomain**, and anything claiming otherwise is overselling. What this can
+and cannot see:
+
+| Situation | Discoverable? |
+| --- | --- |
+| Host has a public TLS certificate (most websites) | Yes — CT logs |
+| Host appears in passive DNS feeds | Yes |
+| Host name is in the built-in list or your wordlist | Yes — brute force |
+| Private/internal host with no public cert and an unguessable name | **No** — not in any public source |
+| Wildcard DNS with real hosts behind it | Partly — filtered to avoid thousands of false positives |
+| Wildcard DNS whose answers *change* per query (shared hosts) | Passive only — brute force is skipped, because every guess would resolve |
+| Names behind internal-only DNS, VPN or split-horizon | **No** — not visible publicly |
+
+To widen coverage, use a bigger wordlist (`--wordlist`), e.g. SecLists' `subdomains-top1million.txt`.
+
+Then feed the list back in: the plain `.txt` works directly as a targets list, and after a menu run
+scrapit offers to set the first result as the next target.
+
 ## Safety model
 
 Scrapit is deliberately conservative:
@@ -320,6 +384,8 @@ paths.py   ── load, clean, dedupe paths
       │
 discovery.py ── links, sitemaps, crawl seeds (auto-scrape mode)
       │
+subdomains.py ── CT/passive-DNS sources, DNS brute force, list output
+      │
 safety.py  ── scope confirmation, DNS/IP policy, robots.txt rules
       │
 fetcher.py ── sequential GETs, crawl queue, retries, redirects, soft-404, assets, live UI
@@ -337,6 +403,7 @@ report.py  ── results.json / results.csv / report.md + rich summary
 | `scrapit/config.py` | Defaults and validation |
 | `scrapit/paths.py` | Paths-file parsing and normalization |
 | `scrapit/discovery.py` | Link/sitemap extraction and crawl seeds for auto-scrape mode |
+| `scrapit/subdomains.py` | Subdomain enumeration: CT/passive-DNS sources, DNS brute force, outputs |
 | `scrapit/safety.py` | Scope confirmation, IP policy, robots rules |
 | `scrapit/fetcher.py` | HTTP loop, retries, redirects, soft-404, assets, run orchestration |
 | `scrapit/storage.py` | Run folder layout, sanitization, safe writes, ZIP |

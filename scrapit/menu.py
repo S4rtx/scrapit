@@ -141,6 +141,7 @@ class MenuApp:
         self.paths: list[str] = paths or []
         self.paths_info: PathLoadResult | None = None
         self.last_run: RunSummary | None = None
+        self.last_subdomains: Any | None = None
         self.assume_yes = assume_yes
         self.run_name = run_name.strip() if run_name and run_name.strip() else None
         if target:
@@ -189,14 +190,15 @@ class MenuApp:
                     ("1. Set target URL", "target"),
                     ("2. Load paths file (.txt)", "paths"),
                     ("3. Auto-scrape this site (no paths file)", "auto"),
-                    ("4. Settings", "settings"),
-                    ("5. Preview URLs that will be requested", "preview"),
-                    ("6. Start fetching", "start"),
-                    ("7. View last results", "results"),
-                    ("8. Export report / ZIP the downloads", "export"),
-                    ("9. Help / About", "help"),
-                    ("10. Check for updates", "update"),
-                    ("11. Exit", "exit"),
+                    ("4. Find subdomains (passive + brute force)", "subdomains"),
+                    ("5. Settings", "settings"),
+                    ("6. Preview URLs that will be requested", "preview"),
+                    ("7. Start fetching", "start"),
+                    ("8. View last results", "results"),
+                    ("9. Export report / ZIP the downloads", "export"),
+                    ("10. Help / About", "help"),
+                    ("11. Check for updates", "update"),
+                    ("12. Exit", "exit"),
                 ],
                 default="target",
             )
@@ -217,6 +219,8 @@ class MenuApp:
                     self._load_paths()
                 elif choice == "auto":
                     self._auto_scrape()
+                elif choice == "subdomains":
+                    self._find_subdomains()
                 elif choice == "settings":
                     self._settings()
                 elif choice == "preview":
@@ -639,6 +643,96 @@ class MenuApp:
         if summary is not None:
             self.last_run = summary
 
+    def _find_subdomains(self) -> None:
+        """Enumerate subdomains and write a list that can be fed back in as targets."""
+        from .subdomains import (
+            SubdomainError,
+            enumerate_subdomains,
+            load_wordlist,
+            registrable_domain,
+            write_outputs,
+        )
+
+        self.console.print(
+            Panel(
+                Text.from_markup(
+                    "[bold]Find subdomains[/bold]\n"
+                    "Queries public certificate-transparency and passive-DNS sources, then (optionally) "
+                    "brute-forces common names over DNS. Writes a plain list you can reuse.\n"
+                    "[dim]No technique finds every subdomain: names absent from public logs and the "
+                    "wordlist cannot be discovered. Use your own wordlist to widen coverage.[/dim]"
+                ),
+                title="Subdomain finder",
+                border_style="cyan",
+            )
+        )
+
+        default_domain = host_of(self.target) if self.target else ""
+        raw = text(self.console, "Domain (for example example.com)", default=default_domain)
+        if raw is None:
+            return
+        try:
+            domain = registrable_domain(raw.strip() or default_domain)
+        except SubdomainError as exc:
+            self.console.print(Panel(f"[red]{escape(str(exc))}[/red]", title="Invalid domain", border_style="red"))
+            return
+
+        answer = confirm(self.console, "Also brute-force common names over DNS?", True)
+        if answer is None:
+            return
+        words: list[str] = []
+        if answer:
+            wl = text(self.console, "Wordlist file (blank = built-in list)", default="")
+            if wl is None:
+                return
+            try:
+                words = load_wordlist(wl.strip() or None)
+            except SubdomainError as exc:
+                self.console.print(f"[yellow]{escape(str(exc))}[/yellow]")
+                return
+            self.console.print(f"[dim]Brute forcing {len(words)} name(s) with parallel DNS lookups.[/dim]")
+
+        self.console.print(f"[dim]Querying public sources for {escape(domain)}...[/dim]")
+
+        def on_source(source: str, count: int, error: str | None) -> None:
+            if error:
+                self.console.print(f"  [yellow]{escape(source)}[/yellow] [dim]failed: {escape(error)}[/dim]")
+            else:
+                self.console.print(f"  [green]{escape(source)}[/green] {count} name(s)")
+
+        def on_progress(name: str, is_real: bool, done: int, total: int) -> None:
+            if is_real:
+                self.console.print(f"   [green]+ {escape(name)}[/green]")
+
+        try:
+            result = enumerate_subdomains(
+                domain,
+                bruteforce=bool(words),
+                words=words,
+                on_source=on_source,
+                on_progress=on_progress,
+            )
+        except KeyboardInterrupt:
+            self.console.print("\n[yellow]Interrupted.[/yellow]")
+            return
+
+        try:
+            paths = write_outputs(result, self.config.output_dir / "subdomains" / domain)
+        except OSError as exc:
+            self.console.print(Panel(f"[red]Cannot write output: {escape(str(exc))}[/red]", title="Write error", border_style="red"))
+            return
+
+        report.render_subdomain_summary(self.console, result, paths)
+        self.last_subdomains = result
+
+        if result.names and confirm(
+            self.console,
+            "Use the first subdomain as the new target for scraping?",
+            False,
+        ):
+            if self._assign_target(result.names[0]):
+                self.console.print(f"[green]Target set:[/green] {escape(self.target or '')}")
+
     def _view_results(self) -> None:
         run_dir = self.last_run.run_dir if self.last_run else find_latest_run(self.config.output_dir)
         if run_dir is None:
@@ -721,7 +815,7 @@ class MenuApp:
             return
         answer = confirm(self.console, prompt, False)
         if not answer:
-            self.console.print("[dim]Update skipped. Use option 9 from the menu to update later.[/dim]")
+            self.console.print("[dim]Update skipped. Use option 11 from the menu to update later.[/dim]")
             return
         result = perform_update()
         if result.error:
@@ -776,6 +870,11 @@ class MenuApp:
                     "[bold]Auto-scrape[/bold] - option 3 (or --discover) crawls the target instead of using a "
                     "paths file: it reads robots.txt and sitemaps, then follows same-host links up to the "
                     "crawl depth. Off-host links, assets and non-http(s) schemes are ignored.\n\n"
+                    "[bold]Subdomains[/bold] - option 4 (or --subdomains DOMAIN) queries public certificate-"
+                    "transparency and passive-DNS sources, then brute-forces common names over DNS with "
+                    "wildcard-noise filtering. It writes subdomains.txt/csv/json; the .txt is a plain list "
+                    "you can reuse, one host per line. No method finds every subdomain - names missing from "
+                    "public logs and your wordlist cannot be discovered.\n\n"
                     "[bold]Paths file[/bold] - one path per line. Blank lines and lines starting with # are ignored. "
                     "A leading slash is added when missing. Full URLs are accepted only when their host matches "
                     "the target. Exact duplicates are removed and order is preserved.\n\n"
